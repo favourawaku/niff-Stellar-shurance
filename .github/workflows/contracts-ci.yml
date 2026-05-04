@@ -162,7 +162,7 @@ jobs:
         run: cargo install cargo-audit --locked
 
       - name: Audit Cargo dependencies
-        run: cargo audit --deny warnings
+        run: cargo audit --deny warnings --config audit.toml
 
   # ── 6. Event dictionary sync guard ──────────────────────────────────────────
   event-dictionary:

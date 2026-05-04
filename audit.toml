@@ -1,0 +1,14 @@
+# cargo audit configuration
+# These advisories are in transitive dependencies of soroban-sdk 25.x and cannot
+# be resolved by this project directly. They will be fixed upstream when soroban-sdk
+# updates its dependency tree.
+
+[advisories]
+ignore = [
+    # derivative 2.2.0 — unmaintained; pulled in by ark-ec/ark-ff via soroban-env-host
+    "RUSTSEC-2024-0388",
+    # paste 1.0.15 — unmaintained; pulled in by wasmi_core/ark-ff via soroban-env-host
+    "RUSTSEC-2024-0436",
+    # rand 0.8.5 — unsound with custom logger; pulled in by soroban-sdk/soroban-env-host
+    "RUSTSEC-2026-0097",
+]
