@@ -93,15 +93,11 @@ fn withdraw_emits_claim_withdrawn_event() {
     client.withdraw_claim(&holder, &cid);
 
     let all_events = env.events().all();
-    let mut found = false;
-    for (_, topics, _) in all_events.iter() {
-        let topic_debug = soroban_sdk::testutils::arbitrary::std::format!("{:?}", topics);
-        if topic_debug.contains("claim_withdrawn") {
-            found = true;
-        }
-    }
-
-    assert!(found, "withdrawal must emit claim_withdrawn");
+    let events_debug = soroban_sdk::testutils::arbitrary::std::format!("{:?}", all_events);
+    assert!(
+        events_debug.contains("claim_withdrawn"),
+        "withdrawal must emit claim_withdrawn"
+    );
 }
 
 #[test]
