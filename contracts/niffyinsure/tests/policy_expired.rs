@@ -130,14 +130,18 @@ fn process_expired_records_once_when_observed_after_expiry_ledger() {
 
 #[test]
 fn renew_when_expired_records_notice_once() {
+    use niffyinsure::types::DEFAULT_GRACE_PERIOD_LEDGERS;
     let (env, client, _, token) = setup();
     let holder = Address::generate(&env);
-    client.test_seed_policy(&holder, &1u32, &1_000_000i128, &400u32);
+    let end = 400u32;
+    client.test_seed_policy(&holder, &1u32, &1_000_000i128, &end);
     token::StellarAssetClient::new(&env, &token).mint(&holder, &100_000_000i128);
-    token::Client::new(&env, &token).approve(&holder, &client.address, &100_000_000i128, &(900u32));
+    token::Client::new(&env, &token).approve(&holder, &client.address, &100_000_000i128, &(end + DEFAULT_GRACE_PERIOD_LEDGERS + 1000));
 
+    // Advance past grace period so renew_policy returns Lapsed
+    let lapsed = end.saturating_add(DEFAULT_GRACE_PERIOD_LEDGERS);
     env.ledger().with_mut(|l| {
-        l.sequence_number = 400;
+        l.sequence_number = lapsed;
     });
 
     assert_try_renew_lapsed(client.try_renew_policy(
@@ -260,6 +264,7 @@ fn initiate_then_process_expired_after_natural_duration() {
         &CoverageType::Standard,
         &80u32,
         &1_000_000i128,
+        &token,
         &niffyinsure::types::InitiatePolicyOptions {
             beneficiary: None,
             deductible: None,
