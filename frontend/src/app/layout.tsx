@@ -1,7 +1,9 @@
 import type { Metadata, Viewport } from "next";
 import { headers } from "next/headers";
+import { Suspense } from "react";
 
 import "./globals.css";
+import { AnalyticsPageView } from "@/components/analytics-page-view";
 import { AnalyticsScript } from "@/components/analytics-script";
 import { CookieConsentBanner } from "@/components/cookie-consent-banner";
 import { ThemeProvider } from "@/components/theme-provider";
@@ -9,6 +11,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { WalletProvider, NetworkMismatchModal } from "@/features/wallet";
 import { inter, ibmPlexMono } from "@/lib/fonts";
 import { QueryProvider } from "@/lib/query";
+import { BottomTabBar } from "@/components/nav/BottomTabBar";
 import { NetworkBanner } from "@/components/ui/network-banner";
 import { OnboardingTour } from "@/components/OnboardingTour";
 import { SessionTimeoutModal } from "@/components/SessionTimeoutModal";
@@ -109,7 +112,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
           }}
         />
       </head>
-      <body className="font-sans antialiased">
+      <body className="font-sans antialiased pb-16 md:pb-0">
         <ThemeProvider defaultTheme="system" storageKey="niffyinsur-theme">
           <QueryProvider>
             <WalletProvider>
@@ -120,6 +123,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
               <CookieConsentBanner />
               <NetworkMismatchModal />
               <Toaster />
+              <BottomTabBar />
             </WalletProvider>
           </QueryProvider>
         </ThemeProvider>
