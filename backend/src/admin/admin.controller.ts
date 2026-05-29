@@ -35,6 +35,7 @@ import { PrivacyService, PrivacyRequestType } from '../maintenance/privacy.servi
 import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { QueueMonitorService } from '../queues/queue-monitor.service';
 import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
+import { AdminTenantsService, CreateTenantDto, UpdateTenantDto } from './admin-tenants.service';
 
 class PrivacyRequestDto {
   @IsString() subjectWalletAddress!: string;
@@ -62,7 +63,7 @@ export class AdminController {
     private readonly queueMonitor: QueueMonitorService,
     private readonly configService: ConfigService,
     private readonly solvencyMonitoringService: SolvencyMonitoringService,
-    private readonly adminStatsService: AdminStatsService,
+    private readonly tenantsService: AdminTenantsService,
   ) {}
 
   /**
@@ -103,6 +104,22 @@ export class AdminController {
       ipAddress: req.ip,
     });
     return { jobId, fromLedger: dto.fromLedger, network, status: 'queued' };
+  }
+
+  /**
+   * GET /admin/reindex/status
+   *
+   * Returns the latest reindex progress for a network, including percentage complete.
+   */
+  @Get('reindex/status')
+  @ApiOperation({ summary: 'Get latest reindex progress for a network' })
+  async getReindexStatus(@Query('network') networkParam?: string) {
+    const network = networkParam ?? this.configService.get<string>('STELLAR_NETWORK', 'testnet');
+    const status = await this.adminService.getReindexStatus(network);
+    if (!status) {
+      throw new NotFoundException(`No reindex progress found for network ${network}`);
+    }
+    return status;
   }
 
   /**
@@ -455,5 +472,79 @@ export class AdminController {
       ipAddress: req.ip,
     });
     return { queue, jobId, status: 'retried' };
+  }
+
+  /**
+   * GET /admin/claims/search
+   *
+   * Search claims with full-text search and filtering.
+   * Supports: q (text search), status, claimant, policyId, dateFrom, dateTo
+   * Returns cursor-paginated results with total count.
+   */
+  @Get('claims/search')
+  @ApiOperation({ summary: 'Search claims with filters and full-text search' })
+  async searchClaims(
+    @Query('q') q?: string,
+    @Query('status') status?: string,
+    @Query('claimant') claimant?: string,
+    @Query('policyId') policyId?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('after') after?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.searchClaims({
+      q,
+      status,
+      claimant,
+      policyId,
+      dateFrom,
+      dateTo,
+      after,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  /**
+   * GET /admin/policies/export
+   *
+   * Stream policies as CSV with optional filtering.
+   * Supports: status, holderAddress, policyType, dateFrom, dateTo
+   * Returns streaming CSV response.
+   */
+  @Get('policies/export')
+  @ApiOperation({ summary: 'Export policies as CSV with filters' })
+  async exportPolicies(
+    @Req() req: AdminRequest,
+    @Res() res: Response,
+    @Query('status') status?: string,
+    @Query('holderAddress') holderAddress?: string,
+    @Query('policyType') policyType?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    const actor = req.user?.walletAddress ?? 'unknown';
+
+    // Write audit log entry
+    await this.auditService.write({
+      actor,
+      action: 'policies_exported',
+      payload: { status, holderAddress, policyType, dateFrom, dateTo },
+      ipAddress: req.ip,
+    });
+
+    // Generate CSV
+    const csv = await this.adminService.exportPoliciesCSV({
+      status,
+      holderAddress,
+      policyType,
+      dateFrom,
+      dateTo,
+    });
+
+    // Stream response
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="policies.csv"');
+    res.send(csv);
   }
 }
