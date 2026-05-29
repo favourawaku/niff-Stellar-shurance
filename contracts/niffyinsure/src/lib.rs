@@ -733,6 +733,33 @@ impl NiffyInsure {
         storage::get_max_evidence_count(&env)
     }
 
+    // ── Policy type registry ──────────────────────────────────────────────────
+
+    /// Admin-only: set (or clear) the payout asset override for a policy type.
+    ///
+    /// When `payout_asset_override` is `Some(asset)`, approved claims for policies of
+    /// `policy_type` are paid out in `asset` instead of the policy's premium asset.
+    /// The override asset must be allowlisted at call time; reverts with
+    /// `AdminError::PayoutAssetOverrideNotAllowlisted` otherwise.
+    ///
+    /// Pass `None` to remove the override and revert to premium-asset payouts.
+    pub fn admin_set_policy_type_config(
+        env: Env,
+        policy_type: types::PolicyType,
+        payout_asset_override: Option<Address>,
+    ) -> Result<(), AdminError> {
+        admin::set_policy_type_config(&env, policy_type, payout_asset_override)
+    }
+
+    /// Read the current [`types::PolicyTypeConfig`] for a policy type.
+    /// Returns `None` when no config has been set (all defaults apply).
+    pub fn get_policy_type_config(
+        env: Env,
+        policy_type: types::PolicyType,
+    ) -> Option<types::PolicyTypeConfig> {
+        storage::get_policy_type_config(&env, &policy_type)
+    }
+
     // ═════════════════════════════════════════════════════════════════════════════
     // PAUSE SYSTEM
     //

@@ -152,8 +152,10 @@ pub enum DataKey {
     // ── Rolling claim cap (persistent) ───────────────────────────────────────
     /// Per-policy rolling window accumulator: (holder, policy_id) → RollingClaimWindowState.
     RollingClaimState(Address, u32),
+    // ── Policy type registry ──────────────────────────────────────────────────
+    /// Admin-configurable per-policy-type settings (instance storage).
+    PolicyTypeConfig(crate::types::PolicyType),
 }
-
 pub fn has_open_claim(env: &Env, holder: &Address, policy_id: u32) -> bool {
     env.storage()
         .instance()
@@ -1174,6 +1176,30 @@ pub fn get_claim_ttl_info(env: &Env, claim_id: u64) -> Option<u32> {
     } else {
         None
     }
+}
+
+// ── Policy type registry (instance) ──────────────────────────────────────────
+
+/// Get the admin-configured settings for a policy type.
+/// Returns `None` when no config has been set (all defaults apply).
+pub fn get_policy_type_config(
+    env: &Env,
+    policy_type: &crate::types::PolicyType,
+) -> Option<crate::types::PolicyTypeConfig> {
+    env.storage()
+        .instance()
+        .get(&DataKey::PolicyTypeConfig(policy_type.clone()))
+}
+
+/// Persist admin-configured settings for a policy type.
+pub fn set_policy_type_config(
+    env: &Env,
+    policy_type: &crate::types::PolicyType,
+    config: &crate::types::PolicyTypeConfig,
+) {
+    env.storage()
+        .instance()
+        .set(&DataKey::PolicyTypeConfig(policy_type.clone()), config);
 }
 
 // ── Non-experimental stubs (panic guards) ────────────────────────────────────
