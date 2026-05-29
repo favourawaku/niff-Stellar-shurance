@@ -148,6 +148,30 @@ Indexers must surface `Withdrawn` status distinctly on the claims board.
 
 ---
 
+### `claim_status_changed` — claim status transition
+
+Emitted on every claim status transition, including filing, vote resolution,
+deadline finalization, payout, and withdrawal.
+
+**Topics:** `("niffyins", "claim_status_changed", claim_id: u64)`
+
+```json
+{
+  "version": 1,
+  "old_status": "Processing",
+  "new_status": "Approved",
+  "at_ledger": 1355527
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `old_status` | ClaimStatus | Status before the transition (`Pending` is used for initial filing) |
+| `new_status` | ClaimStatus | Status after the transition |
+| `at_ledger` | u32 (ledger) | Ledger of the transition |
+
+---
+
 ## Policy lifecycle events  (`namespace = "niffyinsure"`)
 
 ### `PolicyInitiated` — policy bound

@@ -66,7 +66,7 @@
 // or deadline-plurality approval, which is controlled by the DAO snapshot, not
 // the admin. The admin cannot flip a `Rejected` claim to `Approved`.
 use crate::{
-    ledger, storage,
+    events, ledger, storage,
     types::{
         Claim, ClaimEvidenceEntry, ClaimProcessed, ClaimStatus, ClaimStatusHistoryEntry,
         TerminationReason, VoteOption, CLAIM_STATUS_HISTORY_MAX, STRIKE_DEACTIVATION_THRESHOLD,
@@ -341,6 +341,12 @@ pub fn file_claim(
         evidence_hashes,
     }
     .publish(env);
+    events::emit_claim_status_changed(
+        env,
+        claim_id,
+        ClaimStatus::Pending,
+        ClaimStatus::Processing,
+    );
 
     Ok(claim_id)
 }
@@ -376,6 +382,7 @@ pub fn withdraw_claim(env: &Env, claimant: &Address, claim_id: u64) -> Result<()
     }
 
     let now = env.ledger().sequence();
+    let old_status = claim.status.clone();
     claim.status = ClaimStatus::Withdrawn;
     push_status_transition(&mut claim.status_history, ClaimStatus::Withdrawn, now);
 
@@ -395,6 +402,7 @@ pub fn withdraw_claim(env: &Env, claimant: &Address, claim_id: u64) -> Result<()
         at_ledger: now,
     }
     .publish(env);
+    events::emit_claim_status_changed(env, claim_id, old_status, ClaimStatus::Withdrawn);
 
     Ok(())
 }
@@ -471,6 +479,12 @@ pub fn vote_on_claim(
 
     if claim.status != status_before {
         push_status_transition(&mut claim.status_history, claim.status.clone(), now);
+        events::emit_claim_status_changed(
+            env,
+            claim_id,
+            status_before.clone(),
+            claim.status.clone(),
+        );
     }
 
     let newly_rejected = claim.status == ClaimStatus::Rejected;
@@ -549,6 +563,12 @@ fn finalize_claim_inner(env: &Env, claim_id: u64) -> Result<ClaimStatus, Error> 
 
     if claim.status != status_before {
         push_status_transition(&mut claim.status_history, claim.status.clone(), now);
+        events::emit_claim_status_changed(
+            env,
+            claim_id,
+            status_before.clone(),
+            claim.status.clone(),
+        );
     }
 
     let newly_rejected = claim.status == ClaimStatus::Rejected;
@@ -627,11 +647,13 @@ pub fn process_claim(env: &Env, claim_id: u64) -> Result<(), Error> {
         claim.amount,
         now,
     );
+    let old_status = claim.status.clone();
     claim.status = ClaimStatus::Paid;
     push_status_transition(&mut claim.status_history, ClaimStatus::Paid, now);
     storage::set_open_claim(env, &claim.claimant, claim.policy_id, false);
     storage::remove_claim_rate_limit_prev(env, claim_id);
     storage::set_claim(env, &claim);
+    events::emit_claim_status_changed(env, claim_id, old_status, ClaimStatus::Paid);
     Ok(())
 }
 
