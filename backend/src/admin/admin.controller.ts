@@ -25,14 +25,18 @@ import { AdminRoleGuard } from './guards/admin-role.guard';
 import { AdminService } from './admin.service';
 import { AdminPoliciesService } from './admin-policies.service';
 import { AuditService } from './audit.service';
+import { AdminStatsService } from './admin-stats.service';
 import { ReindexDto } from './dto/reindex.dto';
+import { BackfillDto } from './dto/backfill.dto';
 import { AuditQueryDto } from './dto/audit-query.dto';
 import { FeatureFlagDto } from './dto/feature-flag.dto';
 import { SetRateLimitDto, EnableOverrideDto } from './dto/rate-limit.dto';
+import { BulkUpdateClaimsDto, BULK_UPDATE_MAX_BATCH } from './dto/bulk-update-claims.dto';
 import { PrivacyService, PrivacyRequestType } from '../maintenance/privacy.service';
 import { RateLimitService } from '../rate-limit/rate-limit.service';
 import { QueueMonitorService } from '../queues/queue-monitor.service';
 import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
+import { AdminTenantsService, CreateTenantDto, UpdateTenantDto } from './admin-tenants.service';
 
 class PrivacyRequestDto {
   @IsString() subjectWalletAddress!: string;
@@ -60,7 +64,22 @@ export class AdminController {
     private readonly queueMonitor: QueueMonitorService,
     private readonly configService: ConfigService,
     private readonly solvencyMonitoringService: SolvencyMonitoringService,
+    private readonly tenantsService: AdminTenantsService,
   ) {}
+
+  /**
+   * GET /admin/stats
+   *
+   * Aggregated platform metrics: policy counts, claim counts by status,
+   * treasury balance (from Redis solvency snapshot), and indexer lag.
+   * Response is cached in Redis with a short TTL (default: 30s).
+   */
+  @Get('stats')
+  @ApiOperation({ summary: 'Aggregated platform metrics (cached)' })
+  async getStats(@Req() req: AdminRequest) {
+    const tenantId = (req as unknown as { tenantId?: string }).tenantId;
+    return this.adminStatsService.getStats(tenantId);
+  }
 
   /**
    * POST /admin/reindex
@@ -86,6 +105,79 @@ export class AdminController {
       ipAddress: req.ip,
     });
     return { jobId, fromLedger: dto.fromLedger, network, status: 'queued' };
+  }
+
+  /**
+   * GET /admin/reindex/status
+   *
+   * Returns the latest reindex progress for a network, including percentage complete.
+   */
+  @Get('reindex/status')
+  @ApiOperation({ summary: 'Get latest reindex progress for a network' })
+  async getReindexStatus(@Query('network') networkParam?: string) {
+    const network = networkParam ?? this.configService.get<string>('STELLAR_NETWORK', 'testnet');
+    const status = await this.adminService.getReindexStatus(network);
+    if (!status) {
+      throw new NotFoundException(`No reindex progress found for network ${network}`);
+    }
+    return status;
+  }
+
+  /**
+   * POST /admin/indexer/backfill
+   *
+   * Validates the ledger range, splits it into batches, and enqueues one
+   * BullMQ backfill job per batch. Rejects ranges that exceed
+   * MAX_BACKFILL_LEDGER_RANGE before any jobs are created.
+   *
+   * Idempotent: the underlying indexer uses upsert logic so replaying
+   * already-processed ledgers does not create duplicate records.
+   */
+  @Post('indexer/backfill')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @ApiOperation({ summary: 'Enqueue backfill jobs for a ledger range' })
+  async enqueueBackfill(@Body() dto: BackfillDto, @Req() req: AdminRequest) {
+    if (dto.fromLedger > dto.toLedger) {
+      throw new BadRequestException('fromLedger must be <= toLedger');
+    }
+    const maxRange = this.configService.get<number>('MAX_BACKFILL_LEDGER_RANGE', 100_000);
+    const range = dto.toLedger - dto.fromLedger + 1;
+    if (range > maxRange) {
+      throw new BadRequestException(
+        `Ledger range ${range} exceeds MAX_BACKFILL_LEDGER_RANGE (${maxRange})`,
+      );
+    }
+    const network = dto.network ?? this.configService.get<string>('STELLAR_NETWORK', 'testnet');
+    const batchSize = this.configService.get<number>('INDEXER_BATCH_SIZE', 50);
+    const jobs = await this.adminService.enqueueBackfill(
+      dto.fromLedger,
+      dto.toLedger,
+      network,
+      batchSize,
+    );
+    const actor = req.user?.walletAddress ?? 'unknown';
+    await this.auditService.write({
+      actor,
+      action: 'indexer_backfill',
+      payload: { fromLedger: dto.fromLedger, toLedger: dto.toLedger, network, jobCount: jobs.length },
+      ipAddress: req.ip,
+    });
+    return { jobs, fromLedger: dto.fromLedger, toLedger: dto.toLedger, network, batchSize, status: 'queued' };
+  }
+
+  /**
+   * GET /admin/indexer/backfill/:jobId
+   *
+   * Returns the current BullMQ state of a backfill job.
+   */
+  @Get('indexer/backfill/:jobId')
+  @ApiOperation({ summary: 'Get backfill job status' })
+  async getBackfillJob(@Param('jobId') jobId: string) {
+    const job = await this.adminService.getBackfillJob(jobId);
+    if (!job) {
+      throw new NotFoundException(`Backfill job ${jobId} not found`);
+    }
+    return job;
   }
 
   /**
@@ -193,6 +285,27 @@ export class AdminController {
   @ApiOperation({ summary: 'List all feature flags' })
   async listFeatureFlags() {
     return this.adminService.getFeatureFlags();
+  }
+
+  /**
+   * POST /admin/feature-flags
+   *
+   * Creates a new feature flag. Key must be in the predefined allowlist.
+   * Writes an immutable audit row.
+   */
+  @Post('feature-flags')
+  @HttpCode(HttpStatus.CREATED)
+  @ApiOperation({ summary: 'Create a new feature flag (allowlisted keys only)' })
+  async createFeatureFlag(@Body() dto: FeatureFlagDto & { key: string }, @Req() req: AdminRequest) {
+    const actor = req.user?.walletAddress ?? 'unknown';
+    const flag = await this.adminService.createFeatureFlag(dto.key, dto.enabled, dto.description, actor);
+    await this.auditService.write({
+      actor,
+      action: 'feature_flag_create',
+      payload: { key: dto.key, enabled: dto.enabled, description: dto.description },
+      ipAddress: req.ip,
+    });
+    return flag;
   }
 
   /**
@@ -360,5 +473,79 @@ export class AdminController {
       ipAddress: req.ip,
     });
     return { queue, jobId, status: 'retried' };
+  }
+
+  /**
+   * GET /admin/claims/search
+   *
+   * Search claims with full-text search and filtering.
+   * Supports: q (text search), status, claimant, policyId, dateFrom, dateTo
+   * Returns cursor-paginated results with total count.
+   */
+  @Get('claims/search')
+  @ApiOperation({ summary: 'Search claims with filters and full-text search' })
+  async searchClaims(
+    @Query('q') q?: string,
+    @Query('status') status?: string,
+    @Query('claimant') claimant?: string,
+    @Query('policyId') policyId?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+    @Query('after') after?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.adminService.searchClaims({
+      q,
+      status,
+      claimant,
+      policyId,
+      dateFrom,
+      dateTo,
+      after,
+      limit: limit ? parseInt(limit, 10) : undefined,
+    });
+  }
+
+  /**
+   * GET /admin/policies/export
+   *
+   * Stream policies as CSV with optional filtering.
+   * Supports: status, holderAddress, policyType, dateFrom, dateTo
+   * Returns streaming CSV response.
+   */
+  @Get('policies/export')
+  @ApiOperation({ summary: 'Export policies as CSV with filters' })
+  async exportPolicies(
+    @Req() req: AdminRequest,
+    @Res() res: Response,
+    @Query('status') status?: string,
+    @Query('holderAddress') holderAddress?: string,
+    @Query('policyType') policyType?: string,
+    @Query('dateFrom') dateFrom?: string,
+    @Query('dateTo') dateTo?: string,
+  ) {
+    const actor = req.user?.walletAddress ?? 'unknown';
+
+    // Write audit log entry
+    await this.auditService.write({
+      actor,
+      action: 'policies_exported',
+      payload: { status, holderAddress, policyType, dateFrom, dateTo },
+      ipAddress: req.ip,
+    });
+
+    // Generate CSV
+    const csv = await this.adminService.exportPoliciesCSV({
+      status,
+      holderAddress,
+      policyType,
+      dateFrom,
+      dateTo,
+    });
+
+    // Stream response
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="policies.csv"');
+    res.send(csv);
   }
 }
