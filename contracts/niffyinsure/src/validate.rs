@@ -71,6 +71,10 @@ pub enum Error {
     RollingClaimCapExceeded = 54,
     /// Keeper `process_payout_timeout` called before the approved payout deadline elapsed.
     PayoutDeadlineNotReached = 55,
+    /// Evidence count is below the admin-configured minimum.
+    InsufficientEvidence = 56,
+    /// Claim filed within the per-policy cooldown window after last resolution.
+    CooldownActive = 57,
 }
 
 pub fn validate_quorum_bps(bps: u32) -> Result<(), Error> {
@@ -139,6 +143,10 @@ pub fn check_claim_fields(
     let max_evidence = crate::storage::get_max_evidence_count(env);
     if evidence.len() > max_evidence {
         return Err(Error::TooManyImageUrls);
+    }
+    let min_evidence = crate::storage::get_min_evidence_count(env);
+    if evidence.len() < min_evidence {
+        return Err(Error::InsufficientEvidence);
     }
     for entry in evidence.iter() {
         if entry.url.len() > IMAGE_URL_MAX_LEN {
