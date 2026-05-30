@@ -74,6 +74,13 @@ struct FeeRecipientUpdated {
     pub new_recipient: Address,
 }
 
+#[contractevent(topics = ["niffyinsure", "min_solvency_ratio_updated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct MinSolvencyRatioUpdated {
+    pub old_bps: u32,
+    pub new_bps: u32,
+}
+
 #[contractevent(topics = ["niffyinsure", "pause_toggled"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct PauseToggled {
@@ -101,6 +108,7 @@ impl NiffyInsure {
         storage::set_allowed_asset(&env, &token, true);
         storage::set_protocol_fee_bps(&env, 0);
         storage::set_fee_recipient(&env, &env.current_contract_address());
+        storage::set_min_solvency_ratio_bps(&env, 0);
         storage::set_voting_duration_ledgers(&env, ledger::VOTE_WINDOW_LEDGERS);
         storage::set_quorum_bps(&env, types::DEFAULT_QUORUM_BPS);
         Ok(())
@@ -135,6 +143,15 @@ impl NiffyInsure {
 
     pub fn get_fee_recipient(env: Env) -> Address {
         storage::get_fee_recipient(&env)
+    }
+
+    pub fn get_min_solvency_ratio_bps(env: Env) -> u32 {
+        storage::get_min_solvency_ratio_bps(&env)
+    }
+
+    pub fn check_solvency_ratio(env: Env, new_coverage: i128) -> bool {
+        let token_addr = storage::get_token(&env);
+        policy::check_solvency_ratio(&env, &token_addr, new_coverage)
     }
 
     /// Pure quote path: reads config and computes premium only.
@@ -232,6 +249,7 @@ impl NiffyInsure {
             56 => validate::Error::VoteDelegated,
             57 => validate::Error::CircularDelegation,
             58 => validate::Error::ProtocolFeeOutOfBounds,
+            59 => validate::Error::SolvencyRatioOutOfBounds,
             _ => validate::Error::ClaimNotApproved,
         };
         policy::map_quote_error(&env, err)
@@ -477,6 +495,24 @@ impl NiffyInsure {
         FeeRecipientUpdated {
             old_recipient: old,
             new_recipient: recipient,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    pub fn admin_set_min_solvency_ratio_bps(
+        env: Env,
+        ratio_bps: u32,
+    ) -> Result<(), validate::Error> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        storage::bump_instance(&env);
+        validate::validate_min_solvency_ratio_bps(ratio_bps)?;
+        let old = storage::get_min_solvency_ratio_bps(&env);
+        storage::set_min_solvency_ratio_bps(&env, ratio_bps);
+        MinSolvencyRatioUpdated {
+            old_bps: old,
+            new_bps: ratio_bps,
         }
         .publish(&env);
         Ok(())

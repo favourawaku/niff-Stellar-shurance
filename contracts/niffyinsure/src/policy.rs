@@ -58,6 +58,8 @@ pub enum PolicyError {
     Expired = 118,
     /// Supplied `expected_nonce` does not match the holder's current on-chain nonce.
     NonceMismatch = 119,
+    /// Treasury solvency ratio is below the admin-configured threshold.
+    InsufficientSolvency = 121,
 }
 
 #[contracttype]
@@ -266,11 +268,42 @@ pub fn map_quote_error(env: &Env, err: Error) -> QuoteFailure {
         Error::ProtocolFeeOutOfBounds => {
             "protocol fee basis points exceed the configured maximum"
         },
+        Error::SolvencyRatioOutOfBounds => {
+            "minimum solvency ratio basis points outside documented bounds"
+        },
     };
     QuoteFailure {
         code: err as u32,
         message: String::from_str(env, message),
     }
+}
+
+/// Returns true when treasury balance covers approved obligations plus `new_coverage`
+/// at or above the configured minimum solvency ratio.
+pub fn check_solvency_ratio(env: &Env, asset: &Address, new_coverage: i128) -> bool {
+    let min_ratio_bps = storage::get_min_solvency_ratio_bps(env);
+    if min_ratio_bps == 0 {
+        return true;
+    }
+    if new_coverage < 0 {
+        return false;
+    }
+
+    let obligations = storage::outstanding_approved_claim_obligations(env, asset)
+        .saturating_add(new_coverage);
+    if obligations <= 0 {
+        return true;
+    }
+
+    let balance = token::get_treasury_balance(env, asset);
+    if balance < 0 {
+        return false;
+    }
+
+    let Some(numerator) = balance.checked_mul(10_000) else {
+        return true;
+    };
+    numerator / obligations >= min_ratio_bps as i128
 }
 
 /// Turns an accepted quote into an enforceable on-chain policy.
@@ -320,6 +353,9 @@ pub fn initiate_policy(
     }
     if base_amount <= 0 {
         return Err(PolicyError::InvalidCoverage);
+    }
+    if !check_solvency_ratio(env, &asset, base_amount) {
+        return Err(PolicyError::InsufficientSolvency);
     }
 
     let deductible_stored = match deductible {

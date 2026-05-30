@@ -76,6 +76,8 @@ pub enum DataKey {
     ProtocolFeeBps,
     /// Address receiving the protocol fee portion of premiums.
     FeeRecipient,
+    /// Minimum treasury solvency ratio required before binding new policies.
+    MinSolvencyRatioBps,
     PremiumTable,
     CalcAddress,
     /// Boolean allowlist flag per asset contract address.
@@ -320,6 +322,39 @@ pub fn get_fee_recipient(env: &Env) -> Address {
         .instance()
         .get(&DataKey::FeeRecipient)
         .unwrap_or_else(|| env.current_contract_address())
+}
+
+// ── Solvency config (instance) ───────────────────────────────────────────────
+
+pub fn set_min_solvency_ratio_bps(env: &Env, bps: u32) {
+    env.storage()
+        .instance()
+        .set(&DataKey::MinSolvencyRatioBps, &bps);
+}
+
+pub fn get_min_solvency_ratio_bps(env: &Env) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::MinSolvencyRatioBps)
+        .unwrap_or(0)
+}
+
+pub fn outstanding_approved_claim_obligations(env: &Env, asset: &Address) -> i128 {
+    let claim_counter = get_claim_counter(env);
+    let mut total: i128 = 0;
+
+    for claim_id in 1..=claim_counter {
+        if let Some(claim) = get_claim(env, claim_id) {
+            if claim.status == crate::types::ClaimStatus::Approved && claim.asset == *asset {
+                let net = claim.amount.saturating_sub(claim.deductible);
+                if net > 0 {
+                    total = total.saturating_add(net);
+                }
+            }
+        }
+    }
+
+    total
 }
 
 // ── Governance: claim voting duration (instance) ─────────────────────────────

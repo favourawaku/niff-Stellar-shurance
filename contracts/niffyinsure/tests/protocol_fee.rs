@@ -79,8 +79,7 @@ fn zero_fee_sends_full_premium_to_treasury() {
         &1_000_000,
         &false,
         token.clone(),
-    )
-    .unwrap();
+    );
     let premium = quote.total_premium;
 
     initiate_policy(&client, &holder, &token);
@@ -113,7 +112,6 @@ fn non_zero_fee_splits_premium_between_treasury_and_recipient() {
             &false,
             token.clone(),
         )
-        .unwrap()
         .total_premium;
     let fee = premium * 250 / 10_000;
 
@@ -145,7 +143,6 @@ fn max_fee_is_allowed_and_calculated_correctly() {
             &false,
             token.clone(),
         )
-        .unwrap()
         .total_premium;
     let fee = premium * (PROTOCOL_FEE_BPS_MAX as i128) / 10_000;
 
@@ -179,7 +176,6 @@ fn fee_recipient_update_is_used_for_subsequent_premiums() {
             &false,
             token.clone(),
         )
-        .unwrap()
         .total_premium;
     let fee = premium * 500 / 10_000;
 

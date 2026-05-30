@@ -74,6 +74,10 @@ pub const QUORUM_BPS_DENOMINATOR: u32 = 10_000;
 /// Absolute maximum protocol fee in basis points.
 pub const PROTOCOL_FEE_BPS_MAX: u32 = 1_000;
 
+/// Solvency threshold bounds in basis points. `100_000` = 1,000%.
+pub const MIN_SOLVENCY_RATIO_BPS_MIN: u32 = 0;
+pub const MIN_SOLVENCY_RATIO_BPS_MAX: u32 = 100_000;
+
 // ── Enums ─────────────────────────────────────────────────────────────────────
 
 #[contracttype]
