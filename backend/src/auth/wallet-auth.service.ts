@@ -133,8 +133,13 @@ export class WalletAuthService {
       this.configService.get<string>('JWT_EXPIRES_IN', '1h'),
     );
     const now = Math.floor(Date.now() / 1000);
-    // scope='user' — explicitly not admin
-    const payload = { sub: canonicalKey, scope: 'user', iat: now, exp: now + ttlSeconds };
+    // scope='user' — explicitly not admin; walletAddress required by JwtStrategy.validate
+    // Do NOT set iat/exp in payload — JwtModule signOptions handles expiresIn
+    const payload = {
+      sub: canonicalKey,
+      walletAddress: canonicalKey,
+      scope: 'user',
+    };
     const token = this.jwtService.sign(payload);
     const expiresAt = new Date((now + ttlSeconds) * 1000).toISOString();
 
