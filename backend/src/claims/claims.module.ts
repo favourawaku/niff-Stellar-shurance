@@ -9,6 +9,7 @@ import { EvidenceUploadService } from './services/evidence-upload.service';
 import { EvidenceProxyService } from './services/evidence-proxy.service';
 import { ClaimDeadlineProcessorService } from './claim-deadline.processor.service';
 import { ClaimDeadlineBootstrap } from './claim-deadline.bootstrap';
+import { ClaimHistoryService } from './services/claim-history.service';
 import { RpcModule } from '../rpc/rpc.module';
 import { RateLimitModule } from '../rate-limit/rate-limit.module';
 import { TenantModule } from '../tenant/tenant.module';
@@ -31,6 +32,7 @@ import { AdminModule } from '../admin/admin.module';
     EvidenceProxyService,
     ClaimDeadlineProcessorService,
     ClaimDeadlineBootstrap,
+    ClaimHistoryService,
   ],
   exports: [
     ClaimsService,

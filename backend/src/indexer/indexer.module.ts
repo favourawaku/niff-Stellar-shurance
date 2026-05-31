@@ -9,30 +9,11 @@ import { ReconciliationService } from './reconciliation.service';
 import { PrismaModule } from '../prisma/prisma.module';
 import { RpcModule } from '../rpc/rpc.module';
 import { EventsModule } from '../events/events.module';
-import { CacheModule } from '../cache/cache.module';
-import { MetricsModule } from '../metrics/metrics.module';
-import { ClaimSummaryCacheService } from '../claims/services/claim-summary-cache.service';
-import { VotePubSubService } from '../graphql/vote-pubsub.service';
+import { ClaimPayoutVerificationService } from '../claims/services/claim-payout-verification.service';
 
 @Module({
-  imports: [
-    PrismaModule,
-    RpcModule,
-    ConfigModule,
-    ScheduleModule.forRoot(),
-    EventsModule,
-    CacheModule,
-    MetricsModule,
-  ],
-  providers: [
-    IndexerService,
-    IndexerWorker,
-    ReindexWorkerService,
-    BackfillWorkerService,
-    ReconciliationService,
-    ClaimSummaryCacheService,
-    VotePubSubService,
-  ],
+  imports: [PrismaModule, RpcModule, ConfigModule, ScheduleModule.forRoot(), EventsModule],
+  providers: [IndexerService, ClaimPayoutVerificationService, IndexerWorker, ReindexWorkerService, BackfillWorkerService, ReconciliationService],
   exports: [IndexerService, ReconciliationService],
 })
 export class IndexerModule {}

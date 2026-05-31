@@ -5,6 +5,7 @@ pub mod admin;
 mod calculator;
 mod claim;
 pub mod commit_reveal;
+pub mod delegation;
 pub mod events;
 pub mod governance;
 mod governance_token;
@@ -24,7 +25,7 @@ mod oracle;
 #[cfg(feature = "experimental")]
 pub use oracle::*;
 
-use soroban_sdk::{contract, contractevent, contractimpl, panic_with_error, Address, Env, Vec};
+use soroban_sdk::{contract, contractevent, contractimpl, panic_with_error, Address, Env, String, Vec};
 
 #[contract]
 pub struct NiffyInsure;
@@ -40,6 +41,23 @@ pub enum InitError {
     AlreadyInitialized = 1,
 }
 
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[soroban_sdk::contracterror]
+#[repr(u32)]
+pub enum VetError {
+    /// Vet does not have the required specialization for this record type.
+    InsufficientSpecialization = 1,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[soroban_sdk::contracterror]
+#[repr(u32)]
+pub enum SubscriptionError {
+    /// Address has reached the maximum of 10 active subscriptions.
+    TooManySubscriptions = 1,
+    /// Subscription not found or already expired.
+    NotFound = 2,
+}
 #[contractevent(topics = ["niffyinsure", "allowed_asset_updated"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AllowedAssetUpdated {
@@ -55,11 +73,34 @@ struct VotingDurationUpdated {
     pub new_ledgers: u32,
 }
 
+#[contractevent(topics = ["niffyinsure", "asset_claim_bounds_updated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AssetClaimBoundsUpdated {
+    #[topic]
+    pub asset: Address,
+    pub min_claim_amount: i128,
+    pub max_claim_amount: i128,
+}
+
+#[contractevent(topics = ["niffyinsure", "reinsurance_contract_updated"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ReinsuranceContractUpdated {
+    pub reinsurance_contract: Address,
+}
+
 #[contractevent(topics = ["niffyinsure", "quorum_updated"])]
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct QuorumUpdated {
     pub old_bps: u32,
     pub new_bps: u32,
+}
+
+#[contractevent(topics = ["niffyinsure", "policy_type_registered"])]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PolicyTypeRegistered {
+    pub policy_type: types::PolicyType,
+    /// `true` = registered/active, `false` = deregistered/inactive.
+    pub active: bool,
 }
 
 #[contractevent(topics = ["niffyinsure", "pause_toggled"])]
@@ -347,6 +388,18 @@ impl NiffyInsure {
         claim::process_deadline(&env, claim_id)
     }
 
+    /// Permissionless keeper: finalize multiple expired claims in one transaction.
+    ///
+    /// Processes each claim independently; skips already-finalized or ineligible claims.
+    /// Reverts before any processing if `claim_ids.len() > BATCH_FINALIZE_MAX` (20).
+    /// Returns `(processed, skipped)` counts.
+    pub fn finalize_expired_batch(
+        env: Env,
+        claim_ids: soroban_sdk::Vec<u64>,
+    ) -> Result<(u32, u32), validate::Error> {
+        claim::finalize_expired_batch(&env, &claim_ids)
+    }
+
     /// Permissionless keeper: auto-reject an approved claim once its payout deadline has elapsed.
     pub fn process_payout_timeout(
         env: Env,
@@ -422,6 +475,13 @@ impl NiffyInsure {
             admin::emit_admin_action(&env, &admin, "process_claim");
         }
         result
+    }
+
+    /// Admin-only: dispute an approved claim during the dispute window.
+    pub fn admin_dispute_claim(env: Env, claim_id: u64) -> Result<(), validate::Error> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        claim::dispute_claim(&env, claim_id)
     }
 
     pub fn get_claim(env: Env, claim_id: u64) -> Result<types::Claim, validate::Error> {
@@ -531,6 +591,189 @@ impl NiffyInsure {
         storage::get_calc_address(&env)
     }
 
+    // ── Region registry ───────────────────────────────────────────────────────
+
+    /// Admin-only: upsert a region code in the registry.
+    pub fn admin_set_region(
+        env: Env,
+        code: String,
+        config: types::RegionConfig,
+    ) {
+        let _admin = admin::require_admin(&env);
+        storage::bump_instance(&env);
+        let mut registry = storage::get_region_registry(&env);
+        registry.set(code, config);
+        storage::set_region_registry(&env, &registry);
+    }
+
+    /// Admin-only: remove a region code from the registry.
+    pub fn admin_remove_region(env: Env, code: String) {
+        let _admin = admin::require_admin(&env);
+        storage::bump_instance(&env);
+        let mut registry = storage::get_region_registry(&env);
+        registry.remove(code);
+        storage::set_region_registry(&env, &registry);
+    }
+
+    /// Read-only: get a region config by code.
+    pub fn get_region_config(
+        env: Env,
+        code: String,
+    ) -> Option<types::RegionConfig> {
+        storage::get_region_config(&env, &code)
+    }
+
+    // ── Treatment tracking ────────────────────────────────────────────────────
+
+    /// Record a treatment for a pet. Increments the treatment counter for `pet_id`.
+    /// Caller must be authenticated (holder of the associated policy).
+    pub fn record_treatment(env: Env, holder: Address, pet_id: u64) -> u64 {
+        holder.require_auth();
+        storage::bump_instance(&env);
+        storage::increment_treatment_count(&env, pet_id)
+    }
+
+    /// Read-only: total number of treatments recorded for `pet_id`.
+    pub fn get_treatment_count(env: Env, pet_id: u64) -> u64 {
+        storage::get_treatment_count(&env, pet_id)
+    }
+
+    // ── Vet specialization registry ───────────────────────────────────────────
+
+    /// Admin-only: register or update a vet's verified specializations.
+    pub fn admin_set_vet_specializations(
+        env: Env,
+        vet: Address,
+        specializations: Vec<types::Specialization>,
+    ) {
+        let _admin = admin::require_admin(&env);
+        storage::bump_instance(&env);
+        storage::set_vet_specializations(&env, &vet, &specializations);
+    }
+
+    /// Read-only: return the verified specializations for a vet address.
+    pub fn get_vet_specializations(env: Env, vet: Address) -> Vec<types::Specialization> {
+        storage::get_vet_specializations(&env, &vet)
+    }
+
+    /// Validate that `vet` is qualified to submit a record of `record_type`.
+    /// Reverts with `VetError::InsufficientSpecialization` if not qualified.
+    pub fn assert_vet_qualified(
+        env: Env,
+        vet: Address,
+        record_type: types::MedicalRecordType,
+    ) -> Result<(), VetError> {
+        match record_type.required_specialization() {
+            None => Ok(()),
+            Some(required) => {
+                if storage::vet_has_specialization(&env, &vet, &required) {
+                    Ok(())
+                } else {
+                    Err(VetError::InsufficientSpecialization)
+                }
+            }
+        }
+    }
+
+    // ── Event subscription filter system ──────────────────────────────────────
+
+    /// Register a subscription filter. TTL is `ttl_ledgers` from the current ledger.
+    /// Max 10 active subscriptions per address; expired subscriptions are pruned on registration.
+    /// Returns the new subscription ID.
+    pub fn register_subscription(
+        env: Env,
+        owner: Address,
+        event_types: Vec<types::EventType>,
+        pet_ids: Vec<u64>,
+        ttl_ledgers: u32,
+    ) -> Result<u64, SubscriptionError> {
+        owner.require_auth();
+        storage::bump_instance(&env);
+
+        let now = env.ledger().sequence();
+        let expires_at = now.saturating_add(ttl_ledgers);
+
+        // Prune expired subscriptions for this owner.
+        let mut ids = storage::get_owner_subscription_ids(&env, &owner);
+        let mut active: Vec<u64> = Vec::new(&env);
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            if let Some(sub) = storage::get_subscription(&env, id) {
+                if sub.expires_at >= now {
+                    active.push_back(id);
+                } else {
+                    storage::remove_subscription(&env, id);
+                }
+            }
+        }
+        ids = active;
+
+        if ids.len() >= types::MAX_SUBSCRIPTIONS_PER_ADDRESS {
+            return Err(SubscriptionError::TooManySubscriptions);
+        }
+
+        let sub_id = storage::next_subscription_id(&env);
+        let sub = types::Subscription {
+            id: sub_id,
+            owner: owner.clone(),
+            event_types,
+            pet_ids,
+            expires_at,
+        };
+        storage::set_subscription(&env, &sub);
+        ids.push_back(sub_id);
+        storage::set_owner_subscription_ids(&env, &owner, &ids);
+
+        Ok(sub_id)
+    }
+
+    /// Read-only: get a subscription by ID. Returns None if not found or expired.
+    pub fn get_subscription(env: Env, id: u64) -> Option<types::Subscription> {
+        let now = env.ledger().sequence();
+        storage::get_subscription(&env, id).filter(|s| s.expires_at >= now)
+    }
+
+    /// Cancel a subscription. Only the owner may cancel.
+    pub fn cancel_subscription(
+        env: Env,
+        owner: Address,
+        sub_id: u64,
+    ) -> Result<(), SubscriptionError> {
+        owner.require_auth();
+        let sub = storage::get_subscription(&env, sub_id).ok_or(SubscriptionError::NotFound)?;
+        if sub.owner != owner {
+            return Err(SubscriptionError::NotFound);
+        }
+        storage::remove_subscription(&env, sub_id);
+        // Remove from owner index.
+        let ids = storage::get_owner_subscription_ids(&env, &owner);
+        let mut updated: Vec<u64> = Vec::new(&env);
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            if id != sub_id {
+                updated.push_back(id);
+            }
+        }
+        storage::set_owner_subscription_ids(&env, &owner, &updated);
+        Ok(())
+    }
+
+    /// Read-only: list active (non-expired) subscription IDs for an owner.
+    pub fn list_subscriptions(env: Env, owner: Address) -> Vec<u64> {
+        let now = env.ledger().sequence();
+        let ids = storage::get_owner_subscription_ids(&env, &owner);
+        let mut active: Vec<u64> = Vec::new(&env);
+        for i in 0..ids.len() {
+            let id = ids.get(i).unwrap();
+            if let Some(sub) = storage::get_subscription(&env, id) {
+                if sub.expires_at >= now {
+                    active.push_back(id);
+                }
+            }
+        }
+        active
+    }
+
     // ── Policy domain ────────────────────────────────────────────────────
 
     /// Turn an accepted quote into an enforceable on-chain policy.
@@ -562,6 +805,7 @@ impl NiffyInsure {
             opts.beneficiary,
             opts.deductible,
             opts.expected_nonce,
+            opts.metadata_uri,
         )
     }
 
@@ -573,6 +817,18 @@ impl NiffyInsure {
         beneficiary: Option<Address>,
     ) -> Result<(), policy::PolicyError> {
         policy::set_beneficiary(&env, holder, policy_id, beneficiary)
+    }
+
+    /// Admin-only: update the policy metadata URI.
+    pub fn admin_update_policy_metadata_uri(
+        env: Env,
+        holder: Address,
+        policy_id: u32,
+        new_uri: soroban_sdk::String,
+    ) -> Result<(), policy::PolicyError> {
+        let admin = storage::get_admin(&env);
+        admin.require_auth();
+        policy::update_policy_metadata_uri(&env, holder, policy_id, new_uri)
     }
 
     /// Read-only: retrieve a persisted policy by (holder, policy_id).
@@ -696,6 +952,8 @@ impl NiffyInsure {
         age_band: types::AgeBand,
         coverage_type: types::CoverageType,
         safety_score: u32,
+        new_coverage_tier: Option<types::CoverageType>,
+        new_coverage_amount: Option<i128>,
     ) -> Result<types::RenewPolicyOutcome, policy::PolicyError> {
         policy::renew_policy(
             &env,
@@ -704,6 +962,8 @@ impl NiffyInsure {
             age_band,
             coverage_type,
             safety_score,
+            new_coverage_tier,
+            new_coverage_amount,
         )
     }
 
@@ -884,6 +1144,61 @@ impl NiffyInsure {
         storage::get_asset_premium_table(&env, &asset)
     }
 
+    // ── Policy type registry ──────────────────────────────────────────────────
+
+    /// Admin-only: register or update a policy type in the registry.
+    ///
+    /// Once registered and active, `initiate_policy` will accept this type.
+    /// Emits `PolicyTypeRegistered`.
+    pub fn admin_register_policy_type(
+        env: Env,
+        policy_type: types::PolicyType,
+        config: types::PolicyTypeConfig,
+    ) -> Result<(), admin::AdminError> {
+        admin::require_admin(&env);
+        storage::bump_instance(&env);
+        storage::set_policy_type_config(&env, &policy_type, &config);
+        storage::set_policy_type_active(&env, &policy_type, true);
+        PolicyTypeRegistered {
+            policy_type,
+            active: true,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Admin-only: deregister a policy type (marks it inactive).
+    ///
+    /// Existing policies of this type remain valid; only new initiations are blocked.
+    /// Emits `PolicyTypeRegistered` with `active = false`.
+    pub fn admin_deregister_policy_type(
+        env: Env,
+        policy_type: types::PolicyType,
+    ) -> Result<(), admin::AdminError> {
+        admin::require_admin(&env);
+        storage::bump_instance(&env);
+        storage::set_policy_type_active(&env, &policy_type, false);
+        PolicyTypeRegistered {
+            policy_type,
+            active: false,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Read-only: returns `true` if the policy type is registered and active.
+    pub fn is_policy_type_active(env: Env, policy_type: types::PolicyType) -> bool {
+        storage::is_policy_type_active(&env, &policy_type)
+    }
+
+    /// Read-only: returns the config for a policy type, or `None` if not registered.
+    pub fn get_policy_type_config(
+        env: Env,
+        policy_type: types::PolicyType,
+    ) -> Option<types::PolicyTypeConfig> {
+        storage::get_policy_type_config(&env, &policy_type)
+    }
+
     // ═════════════════════════════════════════════════════════════════════════════
     // PAUSE SYSTEM
     //
@@ -1039,6 +1354,124 @@ impl NiffyInsure {
             admin::emit_admin_action(&env, &admin, "set_rolling_claim_window_ledgers");
         }
         result
+    }
+
+    // ── Issue #583: Claim fraud score ─────────────────────────────────────────
+
+    /// Admin or delegated oracle: set fraud score (0–100) for a claim.
+    /// High-score claims require elevated quorum at finalization.
+    pub fn set_claim_fraud_score(
+        env: Env,
+        caller: Address,
+        claim_id: u64,
+        score: u32,
+    ) -> Result<(), validate::Error> {
+        caller.require_auth();
+        claim::set_claim_fraud_score(&env, &caller, claim_id, score)
+    }
+
+    /// Read the fraud score for a claim (None if not set).
+    pub fn get_claim_fraud_score(env: Env, claim_id: u64) -> Option<u32> {
+        storage::get_claim_fraud_score(&env, claim_id)
+    }
+
+    /// Admin: set the fraud score threshold above which elevated quorum applies.
+    pub fn admin_set_fraud_score_threshold(env: Env, threshold: u32) -> Result<(), validate::Error> {
+        let _admin = admin::require_admin(&env);
+        if threshold > 100 {
+            return Err(validate::Error::SafetyScoreOutOfRange);
+        }
+        storage::set_fraud_score_threshold(&env, threshold);
+        Ok(())
+    }
+
+    /// Admin: set the elevated quorum bps used when fraud score exceeds threshold.
+    pub fn admin_set_elevated_quorum_bps(env: Env, bps: u32) -> Result<(), validate::Error> {
+        let _admin = admin::require_admin(&env);
+        validate::validate_quorum_bps(bps)?;
+        storage::set_elevated_quorum_bps(&env, bps);
+        Ok(())
+    }
+
+    // ── Issue #587: Asset-specific claim amount bounds ────────────────────────
+
+    /// Admin: set min/max claim amount bounds for an asset.
+    /// Dust claims below min and over-coverage claims above max will revert.
+    pub fn admin_set_asset_claim_bounds(
+        env: Env,
+        asset: Address,
+        min_claim_amount: i128,
+        max_claim_amount: i128,
+    ) -> Result<(), validate::Error> {
+        let _admin = admin::require_admin(&env);
+        if min_claim_amount < 0 || max_claim_amount < min_claim_amount {
+            return Err(validate::Error::ClaimAmountZero);
+        }
+        storage::set_allowed_asset_config(
+            &env,
+            &asset,
+            &types::AllowedAssetConfig { min_claim_amount, max_claim_amount },
+        );
+        AssetClaimBoundsUpdated {
+            asset,
+            min_claim_amount,
+            max_claim_amount,
+        }
+        .publish(&env);
+        Ok(())
+    }
+
+    /// Read the asset-specific claim bounds (None if not configured).
+    pub fn get_asset_claim_bounds(env: Env, asset: Address) -> Option<types::AllowedAssetConfig> {
+        storage::get_allowed_asset_config(&env, &asset)
+    }
+
+    // ── Issue #585: Admin role delegation ────────────────────────────────────
+
+    /// Admin: grant a temporary delegation to `operator` with specific permissions.
+    pub fn grant_delegation(
+        env: Env,
+        operator: Address,
+        expiry_ledger: u32,
+        permissions: types::DelegationPermissions,
+    ) -> Result<(), validate::Error> {
+        let admin = admin::require_admin(&env);
+        delegation::grant_delegation(&env, &admin, &operator, expiry_ledger, permissions)
+    }
+
+    /// Admin: revoke a delegation before it expires.
+    pub fn revoke_delegation(env: Env, operator: Address) {
+        let admin = admin::require_admin(&env);
+        delegation::revoke_delegation(&env, &admin, &operator);
+    }
+
+    /// Read a delegation record (None if not set or expired).
+    pub fn get_delegation(env: Env, operator: Address) -> Option<types::DelegationRecord> {
+        delegation::get_delegation(&env, &operator)
+    }
+
+    // ── Issue #581: Reinsurance pool ──────────────────────────────────────────
+
+    /// Admin: set the reinsurance contract address.
+    /// When primary treasury is insufficient, overflow is drawn from this contract.
+    pub fn admin_set_reinsurance_contract(env: Env, reinsurance: Address) {
+        let _admin = admin::require_admin(&env);
+        storage::set_reinsurance_contract(&env, &reinsurance);
+        ReinsuranceContractUpdated {
+            reinsurance_contract: reinsurance,
+        }
+        .publish(&env);
+    }
+
+    /// Admin: clear the reinsurance contract (disables reinsurance fallback).
+    pub fn admin_clear_reinsurance_contract(env: Env) {
+        let _admin = admin::require_admin(&env);
+        storage::clear_reinsurance_contract(&env);
+    }
+
+    /// Read the configured reinsurance contract address (None if not set).
+    pub fn get_reinsurance_contract(env: Env) -> Option<Address> {
+        storage::get_reinsurance_contract(&env)
     }
 }
 
