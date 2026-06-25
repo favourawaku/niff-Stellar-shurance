@@ -73,6 +73,13 @@ export interface BulkUpdateResult {
   updated: number
 }
 
+// ── #935 Keeper actions ────────────────────────────────────────────────────
+
+export interface KeeperActionResult {
+  txHash: string
+  ledger: number
+}
+
 // ── API calls ──────────────────────────────────────────────────────────────
 
 export const adminApi = {
@@ -141,5 +148,21 @@ export const adminApi = {
       method: 'POST',
       headers: authHeaders(jwt),
       body: JSON.stringify({ claimIds, status, dryRun }),
+    }),
+
+  // ── #935 Keeper actions ───────────────────────────────────────────────────
+
+  processExpired: (jwt: string, holder: string, policyId: number) =>
+    apiFetch<KeeperActionResult>(`${base()}/keeper/process-expired`, {
+      method: 'POST',
+      headers: authHeaders(jwt),
+      body: JSON.stringify({ holder, policyId }),
+    }),
+
+  processDeadline: (jwt: string, claimId: number) =>
+    apiFetch<KeeperActionResult>(`${base()}/keeper/process-deadline`, {
+      method: 'POST',
+      headers: authHeaders(jwt),
+      body: JSON.stringify({ claimId }),
     }),
 }

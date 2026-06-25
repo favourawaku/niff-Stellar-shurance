@@ -81,6 +81,11 @@ export interface FinalizeClaimResult {
   onChainStatus: string;
 }
 
+export interface KeeperActionResult {
+  txHash: string;
+  ledger: number;
+}
+
 interface PendingSubmission {
   transactionXdr: string;
   timestamp: number;
@@ -1226,6 +1231,72 @@ export class SorobanService implements OnModuleInit, OnModuleDestroy {
     }
 
     return { txHash, ledger, onChainStatus };
+  }
+
+  // ── #935 Keeper Actions ────────────────────────────────────────────────────
+
+  private async submitKeeperTx(
+    operation: xdr.Operation,
+    label: string,
+  ): Promise<KeeperActionResult> {
+    const keeperPublic = this.configService.get<string>('CLAIM_KEEPER_SOURCE_ACCOUNT');
+    const keeperSecret = this.configService.get<string>('CLAIM_KEEPER_SECRET_KEY');
+    if (!keeperPublic || !keeperSecret) {
+      throw new BadRequestException({ code: 'KEEPER_NOT_CONFIGURED', message: `Keeper account not configured (${label})` });
+    }
+    const keypair = Keypair.fromSecret(keeperSecret);
+    const server = this.makeServer();
+    const account = await this.loadAccount(server, keeperPublic);
+    const tx = new TransactionBuilder(account, {
+      fee: BASE_FEE,
+      networkPassphrase: this.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(30)
+      .build();
+    const simResult = await server.simulateTransaction(tx);
+    if (Api.isSimulationError(simResult)) {
+      throw new BadRequestException({ code: 'SIMULATION_FAILED', message: simResult.error });
+    }
+    const assembled = assembleTransaction(tx, simResult).build();
+    assembled.sign(keypair);
+    const send = await server.sendTransaction(assembled);
+    if (send.status === 'ERROR') {
+      throw new BadRequestException({ code: 'TX_SEND_FAILED', message: JSON.stringify(send.errorResult) });
+    }
+    const deadline = Date.now() + 30_000;
+    let poll = await server.getTransaction(send.hash);
+    while (poll.status === SorobanRpc.Api.GetTransactionStatus.NOT_FOUND && Date.now() < deadline) {
+      await new Promise<void>((r) => setTimeout(r, 2_000));
+      poll = await server.getTransaction(send.hash);
+    }
+    if (poll.status !== SorobanRpc.Api.GetTransactionStatus.SUCCESS) {
+      throw new BadRequestException({ code: 'TX_FAILED', message: `${label} transaction status: ${poll.status}` });
+    }
+    return { txHash: send.hash, ledger: (poll as SorobanRpc.Api.GetSuccessfulTransactionResponse).ledger };
+  }
+
+  async invokeProcessExpired({ holder, policyId }: { holder: string; policyId: number }): Promise<KeeperActionResult> {
+    return this.trackRpc('invokeProcessExpired', async () => {
+      const contract = new Contract(this.contractId);
+      const operation = contract.call(
+        'process_expired',
+        new Address(holder).toScVal(),
+        nativeToScVal(policyId, { type: 'u32' }),
+      );
+      return this.submitKeeperTx(operation, 'process_expired');
+    });
+  }
+
+  async invokeProcessDeadline({ claimId }: { claimId: number }): Promise<KeeperActionResult> {
+    return this.trackRpc('invokeProcessDeadline', async () => {
+      const contract = new Contract(this.contractId);
+      const operation = contract.call(
+        'process_deadline',
+        nativeToScVal(claimId, { type: 'u32' }),
+      );
+      return this.submitKeeperTx(operation, 'process_deadline');
+    });
   }
 
   /**

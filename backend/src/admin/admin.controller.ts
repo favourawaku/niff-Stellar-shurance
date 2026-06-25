@@ -37,6 +37,7 @@ import { QueueMonitorService } from '../queues/queue-monitor.service';
 import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
 import { AdminTenantsService } from './admin-tenants.service';
 import { AdminStatsService } from './admin-stats.service';
+import { SorobanService } from '../rpc/soroban.service';
 
 class PrivacyRequestDto {
   @IsString() subjectWalletAddress!: string;
@@ -76,6 +77,7 @@ export class AdminController {
     private readonly solvencyMonitoringService: SolvencyMonitoringService,
     private readonly tenantsService: AdminTenantsService,
     private readonly adminStatsService: AdminStatsService,
+    private readonly soroban: SorobanService,
   ) {}
 
   /**
@@ -542,5 +544,55 @@ export class AdminController {
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="policies.csv"');
     res.send(csv);
+  }
+
+  // ── #935 Keeper Actions ────────────────────────────────────────────────────
+
+  @Post('keeper/process-expired')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Trigger process_expired(holder, policyId) on-chain via keeper key' })
+  async processExpired(
+    @Body() body: { holder: string; policyId: number },
+    @Req() req: AdminRequest,
+  ) {
+    const { holder, policyId } = body;
+    if (!holder || typeof holder !== 'string') {
+      throw new BadRequestException({ code: 'INVALID_HOLDER', message: 'holder must be a Stellar account address' });
+    }
+    const pid = Number(policyId);
+    if (!Number.isFinite(pid) || pid < 0 || !Number.isInteger(pid)) {
+      throw new BadRequestException({ code: 'INVALID_POLICY_ID', message: 'policyId must be a non-negative integer' });
+    }
+    const actor = req.user?.walletAddress ?? req.adminIdentity?.email ?? 'unknown';
+    const result = await this.soroban.invokeProcessExpired({ holder, policyId: pid });
+    await this.auditService.write({
+      actor,
+      action: 'keeper_process_expired',
+      payload: { holder, policyId: pid, txHash: result.txHash },
+      ipAddress: req.ip,
+    });
+    return result;
+  }
+
+  @Post('keeper/process-deadline')
+  @HttpCode(HttpStatus.OK)
+  @ApiOperation({ summary: 'Trigger process_deadline(claimId) on-chain via keeper key' })
+  async processDeadline(
+    @Body() body: { claimId: number },
+    @Req() req: AdminRequest,
+  ) {
+    const cid = Number(body.claimId);
+    if (!Number.isFinite(cid) || cid < 0 || !Number.isInteger(cid)) {
+      throw new BadRequestException({ code: 'INVALID_CLAIM_ID', message: 'claimId must be a non-negative integer' });
+    }
+    const actor = req.user?.walletAddress ?? req.adminIdentity?.email ?? 'unknown';
+    const result = await this.soroban.invokeProcessDeadline({ claimId: cid });
+    await this.auditService.write({
+      actor,
+      action: 'keeper_process_deadline',
+      payload: { claimId: cid, txHash: result.txHash },
+      ipAddress: req.ip,
+    });
+    return result;
   }
 }

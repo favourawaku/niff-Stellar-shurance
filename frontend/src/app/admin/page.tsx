@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, Loader2, RefreshCw, ShieldAlert } from 'lucide-react'
+import { Download, Loader2, RefreshCw, ShieldAlert, CheckCircle2, Zap } from 'lucide-react'
 import Link from 'next/link'
 
 import { Button } from '@/components/ui/button'
@@ -16,7 +16,13 @@ import {
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { useAuth } from '@/lib/hooks/useAuth'
-import { adminApi, type AuditEntry, type FeatureFlag, type SolvencySnapshot } from '@/lib/api/admin'
+import {
+  adminApi,
+  type AuditEntry,
+  type FeatureFlag,
+  type SolvencySnapshot,
+  type KeeperActionResult,
+} from '@/lib/api/admin'
 import { getConfig } from '@/config/env'
 
 // ── JWT role helper ────────────────────────────────────────────────────────
@@ -69,6 +75,7 @@ export default function AdminPage() {
         <SolvencyWidget jwt={jwt} />
         <ReindexWidget jwt={jwt} />
       </div>
+      <KeeperActionsWidget jwt={jwt} />
       <FeatureFlagsWidget jwt={jwt} />
       <AuditLogWidget jwt={jwt} />
     </main>
@@ -404,6 +411,165 @@ function AuditLogWidget({ jwt }: { jwt: string }) {
             Load more
           </Button>
         )}
+      </CardContent>
+    </Card>
+  )
+}
+
+// ── #935 Keeper Actions widget ─────────────────────────────────────────────
+
+type KeeperResult = KeeperActionResult & { action: string }
+
+function KeeperActionsWidget({ jwt }: { jwt: string }) {
+  // process_expired state
+  const [holder, setHolder] = useState('')
+  const [policyId, setPolicyId] = useState('')
+  const [expiredSubmitting, setExpiredSubmitting] = useState(false)
+  const [expiredResult, setExpiredResult] = useState<KeeperResult | null>(null)
+  const [expiredError, setExpiredError] = useState<string | null>(null)
+
+  // process_deadline state
+  const [claimId, setClaimId] = useState('')
+  const [deadlineSubmitting, setDeadlineSubmitting] = useState(false)
+  const [deadlineResult, setDeadlineResult] = useState<KeeperResult | null>(null)
+  const [deadlineError, setDeadlineError] = useState<string | null>(null)
+
+  const pidVal = parseInt(policyId, 10)
+  const cidVal = parseInt(claimId, 10)
+
+  async function handleProcessExpired(e: React.FormEvent) {
+    e.preventDefault()
+    if (!holder || !Number.isFinite(pidVal) || pidVal < 0) return
+    setExpiredSubmitting(true)
+    setExpiredError(null)
+    setExpiredResult(null)
+    try {
+      const r = await adminApi.processExpired(jwt, holder.trim(), pidVal)
+      setExpiredResult({ ...r, action: 'process_expired' })
+    } catch (err: unknown) {
+      setExpiredError(err instanceof Error ? err.message : 'Failed')
+    } finally {
+      setExpiredSubmitting(false)
+    }
+  }
+
+  async function handleProcessDeadline(e: React.FormEvent) {
+    e.preventDefault()
+    if (!Number.isFinite(cidVal) || cidVal < 0) return
+    setDeadlineSubmitting(true)
+    setDeadlineError(null)
+    setDeadlineResult(null)
+    try {
+      const r = await adminApi.processDeadline(jwt, cidVal)
+      setDeadlineResult({ ...r, action: 'process_deadline' })
+    } catch (err: unknown) {
+      setDeadlineError(err instanceof Error ? err.message : 'Failed')
+    } finally {
+      setDeadlineSubmitting(false)
+    }
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <Zap className="h-4 w-4" aria-hidden="true" />
+          Keeper Actions
+        </CardTitle>
+        <CardDescription>
+          Manually trigger keeper contract calls. Use with care — these submit signed
+          on-chain transactions using the platform keeper key.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        {/* process_expired */}
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">process_expired</h3>
+          <p className="text-xs text-muted-foreground">
+            Expires a policy that has passed its coverage end date.
+          </p>
+          <form onSubmit={handleProcessExpired} className="space-y-2">
+            <div className="space-y-1">
+              <label htmlFor="expired-holder" className="text-xs font-medium">Holder address</label>
+              <Input
+                id="expired-holder"
+                type="text"
+                placeholder="G…"
+                value={holder}
+                onChange={(e) => { setHolder(e.target.value); setExpiredResult(null) }}
+                className="h-8 text-xs font-mono"
+              />
+            </div>
+            <div className="space-y-1">
+              <label htmlFor="expired-policy-id" className="text-xs font-medium">Policy ID</label>
+              <Input
+                id="expired-policy-id"
+                type="number"
+                min={0}
+                value={policyId}
+                onChange={(e) => { setPolicyId(e.target.value); setExpiredResult(null) }}
+                className="h-8 w-28 text-xs"
+              />
+            </div>
+            {expiredError && <p className="text-xs text-destructive" role="alert">{expiredError}</p>}
+            {expiredResult && (
+              <p className="text-xs text-green-700 flex items-center gap-1" role="status">
+                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Done — tx {expiredResult.txHash.slice(0, 12)}… (ledger {expiredResult.ledger})
+              </p>
+            )}
+            <Button
+              type="submit"
+              size="sm"
+              disabled={expiredSubmitting || !holder.trim() || !Number.isFinite(pidVal)}
+              aria-busy={expiredSubmitting}
+            >
+              {expiredSubmitting
+                ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />Running…</>
+                : 'Run process_expired'}
+            </Button>
+          </form>
+        </div>
+
+        <hr className="border-border" />
+
+        {/* process_deadline */}
+        <div className="space-y-2">
+          <h3 className="text-sm font-semibold">process_deadline</h3>
+          <p className="text-xs text-muted-foreground">
+            Finalises a claim that has passed its voting deadline.
+          </p>
+          <form onSubmit={handleProcessDeadline} className="space-y-2">
+            <div className="space-y-1">
+              <label htmlFor="deadline-claim-id" className="text-xs font-medium">Claim ID</label>
+              <Input
+                id="deadline-claim-id"
+                type="number"
+                min={0}
+                value={claimId}
+                onChange={(e) => { setClaimId(e.target.value); setDeadlineResult(null) }}
+                className="h-8 w-28 text-xs"
+              />
+            </div>
+            {deadlineError && <p className="text-xs text-destructive" role="alert">{deadlineError}</p>}
+            {deadlineResult && (
+              <p className="text-xs text-green-700 flex items-center gap-1" role="status">
+                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+                Done — tx {deadlineResult.txHash.slice(0, 12)}… (ledger {deadlineResult.ledger})
+              </p>
+            )}
+            <Button
+              type="submit"
+              size="sm"
+              disabled={deadlineSubmitting || !Number.isFinite(cidVal)}
+              aria-busy={deadlineSubmitting}
+            >
+              {deadlineSubmitting
+                ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />Running…</>
+                : 'Run process_deadline'}
+            </Button>
+          </form>
+        </div>
       </CardContent>
     </Card>
   )
