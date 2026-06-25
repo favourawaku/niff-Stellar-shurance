@@ -9,6 +9,33 @@ function authHeaders(jwt: string) {
   return { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' }
 }
 
+// ── Governance Types ────────────────────────────────────────────────────────
+
+export interface RegisteredVoter {
+  walletAddress: string
+  displayName?: string | null
+  registeredBy: string
+  registeredAt: string
+}
+
+export interface QuorumSettings {
+  quorum_bps: number
+}
+
+export interface QuorumImpact {
+  totalActiveClaims: number
+  affectedClaims: Array<{
+    claimId: number
+    currentQuorumBps: number
+    newQuorumBps: number
+    eligibleVoters: number
+    currentRequired: number
+    newRequired: number
+    status: string
+  }>
+  quorumBps: number | null
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface SolvencySnapshot {
