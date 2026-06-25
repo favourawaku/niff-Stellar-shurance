@@ -307,21 +307,47 @@ export function ClaimDetailView({ claimId }: ClaimDetailViewProps) {
         <Card>
           <CardHeader>
             <CardTitle>Status history</CardTitle>
-            <CardDescription>All recorded status transitions in chronological order.</CardDescription>
+            <CardDescription>On-chain status transitions with ledger numbers and estimated timestamps.</CardDescription>
           </CardHeader>
           <CardContent>
-            <ol className="space-y-4" aria-label="Status history">
-              {claim.status_history.map((entry) => (
-                <li key={`${entry.status}-${entry.ledger}`} className="rounded-xl border bg-muted p-4">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                      <p className="text-sm font-medium">{formatStatusLabel(entry.status)}</p>
-                      <p className="text-xs text-muted-foreground">Ledger {entry.ledger}</p>
+            <ol className="relative ml-3 border-l-2 border-gray-200" aria-label="Status timeline">
+              {claim.status_history.map((entry, index) => {
+                const isLatest = index === claim.status_history.length - 1
+                const variant = getStatusVariant(entry.status)
+                const dotColor =
+                  variant === 'success'
+                    ? 'bg-green-500'
+                    : variant === 'destructive'
+                      ? 'bg-red-500'
+                      : 'bg-blue-500'
+
+                return (
+                  <li key={`${entry.status}-${entry.ledger}`} className="relative mb-6 ml-6 last:mb-0">
+                    <span
+                      className={`absolute -left-[31px] flex h-4 w-4 items-center justify-center rounded-full ring-4 ring-background ${dotColor}`}
+                      aria-hidden="true"
+                    />
+                    <div className={`rounded-lg border p-3 ${isLatest ? 'border-primary/30 bg-primary/5' : 'bg-muted'}`}>
+                      <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+                        <div className="flex items-center gap-2">
+                          <Badge variant={getStatusVariant(entry.status)}>
+                            {formatStatusLabel(entry.status)}
+                          </Badge>
+                          {isLatest && (
+                            <span className="text-xs font-medium text-primary">(Current)</span>
+                          )}
+                        </div>
+                        <time className="text-xs text-muted-foreground" dateTime={entry.timestamp}>
+                          {formatTimestamp(entry.timestamp)}
+                        </time>
+                      </div>
+                      <p className="mt-1 text-xs tabular-nums text-muted-foreground">
+                        Ledger #{entry.ledger.toLocaleString()}
+                      </p>
                     </div>
-                    <p className="text-xs text-muted-foreground">{formatTimestamp(entry.timestamp)}</p>
-                  </div>
-                </li>
-              ))}
+                  </li>
+                )
+              })}
             </ol>
           </CardContent>
         </Card>
