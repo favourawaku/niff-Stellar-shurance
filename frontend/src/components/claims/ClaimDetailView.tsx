@@ -233,6 +233,48 @@ export function ClaimDetailView({ claimId }: ClaimDetailViewProps) {
           </CardContent>
         </Card>
 
+        {claim.metadata.status === 'approved' && claim.payout_deadline_ledger != null && (
+          <Card>
+            <CardHeader>
+              <CardTitle>Payout countdown</CardTitle>
+              <CardDescription>
+                Time remaining before the payout deadline. If payout is not executed before this ledger, the claim may time out.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Payout deadline ledger</p>
+                  <p className="text-lg font-semibold tabular-nums">{claim.payout_deadline_ledger.toLocaleString()}</p>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">Current ledger</p>
+                  <p className="text-lg font-semibold tabular-nums">{latestLedger?.toLocaleString() ?? '—'}</p>
+                </div>
+              </div>
+              <div className="rounded-xl border bg-emerald-50 p-4">
+                {latestLedger !== null ? (
+                  latestLedger < claim.payout_deadline_ledger ? (
+                    <div className="flex items-center justify-between gap-4">
+                      <span className="text-sm font-medium text-emerald-800">Time until payout deadline</span>
+                      <DeadlineCountdown
+                        deadlineLedger={claim.payout_deadline_ledger}
+                        currentLedger={latestLedger}
+                      />
+                    </div>
+                  ) : (
+                    <p className="text-sm font-medium text-red-700">
+                      Payout deadline has passed. The claim may be moved to timeout status.
+                    </p>
+                  )
+                ) : (
+                  <p className="text-sm text-muted-foreground">Fetching latest ledger…</p>
+                )}
+              </div>
+            </CardContent>
+          </Card>
+        )}
+
         {claim.metadata.status === 'approved' && claim.dispute.disputeWindowOpen && (
           <Card>
             <CardHeader>
