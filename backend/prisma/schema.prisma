@@ -292,6 +292,20 @@ model FaqStat {
   @@map("faq_stats")
 }
 
+/// Admin-managed FAQ entries shown on the public support page.
+model FaqItem {
+  id           String   @id @default(uuid())
+  question     String
+  answer       String
+  category     String   @default("General")
+  displayOrder Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@index([displayOrder])
+  @@map("faq_items")
+}
+
 /// Tenant provisioning configuration.
 model Tenant {
   id          String   @id @default(uuid())
@@ -327,6 +341,16 @@ model ClaimComment {
   @@index([claimId, deletedAt, createdAt])
   @@index([authorAddress, claimId])
   @@map("claim_comments")
+}
+
+/// Tracks voters registered on-chain via admin governance actions.
+model RegisteredVoter {
+  walletAddress  String   @id @map("wallet_address")
+  displayName    String?  @map("display_name")
+  registeredBy   String   @map("registered_by")
+  registeredAt   DateTime @default(now()) @map("registered_at")
+
+  @@map("registered_voters")
 }
 
 /// Off-chain profile for a wallet holder. Created on first authenticated GET /profile.

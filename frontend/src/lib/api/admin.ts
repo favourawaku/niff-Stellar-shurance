@@ -9,6 +9,33 @@ function authHeaders(jwt: string) {
   return { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' }
 }
 
+// ── Governance Types ────────────────────────────────────────────────────────
+
+export interface RegisteredVoter {
+  walletAddress: string
+  displayName?: string | null
+  registeredBy: string
+  registeredAt: string
+}
+
+export interface QuorumSettings {
+  quorum_bps: number
+}
+
+export interface QuorumImpact {
+  totalActiveClaims: number
+  affectedClaims: Array<{
+    claimId: number
+    currentQuorumBps: number
+    newQuorumBps: number
+    eligibleVoters: number
+    currentRequired: number
+    newRequired: number
+    status: string
+  }>
+  quorumBps: number | null
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface SolvencySnapshot {
@@ -73,16 +100,18 @@ export interface BulkUpdateResult {
   updated: number
 }
 
-// ── #929 Evidence limits ───────────────────────────────────────────────────
-
-export interface EvidenceLimits {
-  minEvidenceCount: number
-  maxEvidenceCount: number
+export interface AllowedAsset {
+  id: string
+  contractId: string
+  symbol: string
+  decimals: number
+  isAllowed: boolean
 }
 
-export interface KeeperActionResult {
-  txHash: string
-  ledger: number
+export interface AddAssetParams {
+  contractId: string
+  symbol: string
+  decimals: number
 }
 
 // ── API calls ──────────────────────────────────────────────────────────────
@@ -155,17 +184,26 @@ export const adminApi = {
       body: JSON.stringify({ claimIds, status, dryRun }),
     }),
 
-  // ── #929 Evidence limits ──────────────────────────────────────────────────
+  listAssets: (jwt: string) =>
+    apiFetch<AllowedAsset[]>(`${base()}/assets`, { headers: authHeaders(jwt) }),
 
-  getEvidenceLimits: (jwt: string) =>
-    apiFetch<EvidenceLimits>(`${base()}/governance/evidence-limits`, {
+  addAsset: (jwt: string, params: AddAssetParams) =>
+    apiFetch<AllowedAsset>(`${base()}/assets`, {
+      method: 'POST',
       headers: authHeaders(jwt),
+      body: JSON.stringify(params),
     }),
 
-  setEvidenceLimits: (jwt: string, min: number, max: number) =>
-    apiFetch<KeeperActionResult>(`${base()}/governance/evidence-limits`, {
+  setAssetAllowed: (jwt: string, id: string, isAllowed: boolean) =>
+    apiFetch<AllowedAsset>(`${base()}/assets/${encodeURIComponent(id)}`, {
       method: 'PATCH',
       headers: authHeaders(jwt),
-      body: JSON.stringify({ min, max }),
+      body: JSON.stringify({ isAllowed }),
+    }),
+
+  removeAsset: (jwt: string, id: string) =>
+    apiFetch<void>(`${base()}/assets/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: authHeaders(jwt),
     }),
 }
