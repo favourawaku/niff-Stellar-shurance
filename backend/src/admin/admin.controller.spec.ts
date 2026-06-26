@@ -14,17 +14,12 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
 import { AdminTenantsService } from './admin-tenants.service';
 import { AdminStatsService } from './admin-stats.service';
-import { AdminAnalyticsService } from './admin-analytics.service';
-import { PrismaService } from '../prisma/prisma.service';
 import { SorobanService } from '../rpc/soroban.service';
 
-const mockPrismaService = {
-  claim: {
-    findFirst: jest.fn(),
-    update: jest.fn(),
-  },
+const mockSorobanService = {
+  simulateGetEvidenceLimits: jest.fn(),
+  invokeAdminSetEvidenceLimits: jest.fn(),
 };
-const mockSorobanService = {};
 
 const mockAdminService = {
   enqueueReindex: jest.fn(),
@@ -104,7 +99,6 @@ describe('AdminController', () => {
         { provide: AdminStatsService, useValue: mockAdminStatsService },
         { provide: AdminAnalyticsService, useValue: mockAdminAnalyticsService },
         { provide: AdminTenantsService, useValue: mockAdminTenantsService },
-        { provide: PrismaService, useValue: mockPrismaService },
         { provide: SorobanService, useValue: mockSorobanService },
       ],
     })
@@ -421,7 +415,6 @@ describe('Admin Role Guard Enforcement', () => {
         { provide: AdminStatsService, useValue: mockAdminStatsService },
         { provide: AdminAnalyticsService, useValue: mockAdminAnalyticsService },
         { provide: AdminTenantsService, useValue: mockAdminTenantsService },
-        { provide: PrismaService, useValue: mockPrismaService },
         { provide: SorobanService, useValue: mockSorobanService },
       ],
     })
