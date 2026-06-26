@@ -25,6 +25,7 @@ import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminRoleGuard } from './guards/admin-role.guard';
+import { MinAdminRole } from './decorators/admin.decorator';
 import { AdminService } from './admin.service';
 import { AdminPoliciesService } from './admin-policies.service';
 import { AuditService } from './audit.service';
@@ -120,6 +121,7 @@ export class AdminController {
    * List all registered voters from the local tracking table.
    */
   @Get('governance/voters')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'List registered voters' })
   async listVoters() {
     return this.prisma.registeredVoter.findMany({
@@ -185,6 +187,7 @@ export class AdminController {
    * Returns the current quorum_bps value from the contract (via simulation).
    */
   @Get('governance/quorum')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Get current quorum_bps value' })
   async getQuorum() {
     const result = await this.sorobanService.simulateGetQuorumBps();
@@ -223,6 +226,7 @@ export class AdminController {
    * affected by changing quorum_bps to the given value.
    */
   @Get('governance/quorum/impact')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Preview impact of quorum change on active claims' })
   async getQuorumImpact(@Query('bps') bps?: string, @Req() req?: AdminRequest) {
     const targetBps = bps ? parseInt(bps, 10) : null;
@@ -260,6 +264,53 @@ export class AdminController {
   }
 
   /**
+   * GET /admin/users
+   *
+   * Lists all holder profiles ordered by lastSeenAt descending.
+   * Useful for dormant account detection: accounts with null or stale
+   * lastSeenAt have not made an authenticated call in the tracked window.
+   *
+   * Supports optional query params:
+   *   - dormantDays (number): only return users not seen in X days
+   *   - limit (number, default 100, max 500)
+   *   - cursor (walletAddress): keyset pagination
+   */
+  @Get('users')
+  @ApiOperation({ summary: 'List holder profiles with last-active timestamp for dormant account detection' })
+  async listUsers(
+    @Query('dormantDays') dormantDays?: string,
+    @Query('limit') limit?: string,
+    @Query('cursor') cursor?: string,
+  ) {
+    const take = Math.min(Number(limit) || 100, 500);
+    const where: Record<string, unknown> = {};
+    if (dormantDays) {
+      const days = parseInt(dormantDays, 10);
+      if (!isNaN(days) && days > 0) {
+        const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000);
+        where['OR'] = [
+          { lastSeenAt: null },
+          { lastSeenAt: { lt: cutoff } },
+        ];
+      }
+    }
+    return this.prisma.holderProfile.findMany({
+      where,
+      orderBy: [{ lastSeenAt: 'desc' }, { walletAddress: 'asc' }],
+      take,
+      ...(cursor ? { skip: 1, cursor: { walletAddress: cursor } } : {}),
+      select: {
+        walletAddress: true,
+        displayName: true,
+        email: true,
+        locale: true,
+        createdAt: true,
+        lastSeenAt: true,
+      },
+    });
+  }
+
+  /**
    * GET /admin/stats
    *
    * Aggregated platform metrics: policy counts, claim counts by status,
@@ -267,6 +318,7 @@ export class AdminController {
    * Response is cached in Redis with a short TTL (default: 30s).
    */
   @Get('stats')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Aggregated platform metrics (cached)' })
   async getStats(@Req() req: AdminRequest) {
     const tenantId = (req as unknown as { tenantId?: string }).tenantId;
@@ -347,6 +399,7 @@ export class AdminController {
    * Returns the current BullMQ state of a backfill job.
    */
   @Get('indexer/backfill/:jobId')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Get backfill job status' })
   async getBackfillJob(@Param('jobId') jobId: string) {
     const job = await this.adminService.getBackfillJob(jobId);
@@ -364,6 +417,7 @@ export class AdminController {
    * Requires: admin role + valid JWT.
    */
   @Get('audits')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Cursor-paginated admin audit log with filters' })
   async getAudits(@Query() query: AuditQueryDto, @Req() req: AdminRequest) {
     const actor = req.user?.walletAddress ?? 'unknown';
@@ -385,6 +439,7 @@ export class AdminController {
    * Requires: admin role + valid JWT.
    */
   @Get('audits/export')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Streaming CSV export of the audit log' })
   async exportAudits(
     @Query() query: AuditQueryDto,
@@ -410,6 +465,7 @@ export class AdminController {
    * Indexed policies. Omit soft-deleted rows unless `include_deleted=true`.
    */
   @Get('policies')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'List indexed policies (optional include_deleted for compliance)' })
   async getAdminPolicies(@Query('include_deleted') includeDeleted?: string) {
     const inc = includeDeleted === 'true' || includeDeleted === '1';
@@ -458,6 +514,7 @@ export class AdminController {
    * Lists all feature flags and their current state.
    */
   @Get('feature-flags')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'List all feature flags' })
   async listFeatureFlags() {
     return this.adminService.getFeatureFlags();
@@ -491,6 +548,7 @@ export class AdminController {
    * scheduled solvency job; may be null before the first successful run.
    */
   @Get('solvency')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Cached solvency snapshot for dashboard (Redis only)' })
   async getSolvencySnapshot() {
     const snapshot = await this.solvencyMonitoringService.getLatestSnapshot();
@@ -526,6 +584,7 @@ export class AdminController {
 
   /** GET /admin/privacy/requests — list all privacy requests. */
   @Get('privacy/requests')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'List privacy requests' })
   async listPrivacyRequests(@Query('page') page = 1, @Query('limit') limit = 20) {
     return this.privacyService.listRequests(Number(page), Number(limit));
@@ -579,6 +638,7 @@ export class AdminController {
    * Get rate limit status for a policy.
    */
   @Get('rate-limits/:policyId')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Get rate limit status for a policy' })
   async getRateLimitStatus(@Param('policyId') policyId: string) {
     return this.rateLimitService.getCounterState(policyId);
@@ -682,6 +742,7 @@ export class AdminController {
    * Returns cursor-paginated results with total count.
    */
   @Get('claims/search')
+  @MinAdminRole('viewer')
   @ApiOperation({ summary: 'Search claims with filters and full-text search' })
   async searchClaims(
     @Query('q') q?: string,

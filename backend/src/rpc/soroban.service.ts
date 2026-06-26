@@ -1238,7 +1238,30 @@ export class SorobanService implements OnModuleInit, OnModuleDestroy {
     return { txHash, ledger, onChainStatus };
   }
 
-  // ── #935 Keeper Actions ────────────────────────────────────────────────────
+  // ── #928 Voting Duration ───────────────────────────────────────────────────
+
+  async simulateGetVotingDuration({ sourceAccount }: { sourceAccount: string }): Promise<VotingDuration> {
+    return this.trackRpc('simulateGetVotingDuration', async () => {
+      const server = this.makeServer();
+      const account = await this.loadAccount(server, sourceAccount);
+      const contract = new Contract(this.contractId);
+      const tx = new TransactionBuilder(account, {
+        fee: BASE_FEE,
+        networkPassphrase: this.networkPassphrase,
+      })
+        .addOperation(contract.call('get_voting_duration_ledgers'))
+        .setTimeout(30)
+        .build();
+      const result = await server.simulateTransaction(tx);
+      if (Api.isSimulationError(result)) {
+        throw new BadRequestException({ code: 'SIMULATION_FAILED', message: result.error });
+      }
+      const raw = result.result?.retval;
+      if (!raw) throw new BadRequestException({ code: 'SIMULATION_EMPTY', message: 'Empty simulation result' });
+      const ledgers = Number(scValToNative(raw));
+      return { votingDurationLedgers: ledgers };
+    });
+  }
 
   private async submitKeeperTx(
     operation: xdr.Operation,
@@ -1281,26 +1304,14 @@ export class SorobanService implements OnModuleInit, OnModuleDestroy {
     return { txHash: send.hash, ledger: (poll as SorobanRpc.Api.GetSuccessfulTransactionResponse).ledger };
   }
 
-  async invokeProcessExpired({ holder, policyId }: { holder: string; policyId: number }): Promise<KeeperActionResult> {
-    return this.trackRpc('invokeProcessExpired', async () => {
+  async invokeAdminSetVotingDuration({ ledgers }: { ledgers: number }): Promise<KeeperActionResult> {
+    return this.trackRpc('invokeAdminSetVotingDuration', async () => {
       const contract = new Contract(this.contractId);
       const operation = contract.call(
-        'process_expired',
-        new Address(holder).toScVal(),
-        nativeToScVal(policyId, { type: 'u32' }),
+        'admin_set_vote_duration_ledgers',
+        nativeToScVal(ledgers, { type: 'u32' }),
       );
-      return this.submitKeeperTx(operation, 'process_expired');
-    });
-  }
-
-  async invokeProcessDeadline({ claimId }: { claimId: number }): Promise<KeeperActionResult> {
-    return this.trackRpc('invokeProcessDeadline', async () => {
-      const contract = new Contract(this.contractId);
-      const operation = contract.call(
-        'process_deadline',
-        nativeToScVal(claimId, { type: 'u32' }),
-      );
-      return this.submitKeeperTx(operation, 'process_deadline');
+      return this.submitKeeperTx(operation, 'admin_set_vote_duration_ledgers');
     });
   }
 
