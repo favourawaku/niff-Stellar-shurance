@@ -15,10 +15,12 @@ import {
   HttpStatus,
   NotFoundException,
   Logger,
+  ParseIntPipe,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { IsArray, IsEnum, IsInt, IsOptional, IsString, Max, Min, ArrayNotEmpty, Matches } from 'class-validator';
+import { IsArray, IsEnum, IsInt, IsOptional, IsString, Max, Min, ArrayNotEmpty, Matches, IsIn } from 'class-validator';
+import { ClaimSeverity } from '@prisma/client';
 import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -37,6 +39,7 @@ import { QueueMonitorService } from '../queues/queue-monitor.service';
 import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
 import { AdminTenantsService } from './admin-tenants.service';
 import { AdminStatsService } from './admin-stats.service';
+import { AdminAnalyticsService } from './admin-analytics.service';
 import { PrismaService } from '../prisma/prisma.service';
 import { SorobanService } from '../rpc/soroban.service';
 
@@ -65,6 +68,11 @@ class PrivacyRequestDto {
   @IsString() subjectWalletAddress!: string;
   @IsEnum(['ANONYMIZE', 'DELETE']) requestType!: PrivacyRequestType;
   @IsOptional() @IsString() notes?: string;
+}
+
+class SetClaimSeverityDto {
+  @IsIn(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
+  severity!: ClaimSeverity;
 }
 
 type AdminRequest = Request & {
@@ -99,6 +107,7 @@ export class AdminController {
     private readonly solvencyMonitoringService: SolvencyMonitoringService,
     private readonly tenantsService: AdminTenantsService,
     private readonly adminStatsService: AdminStatsService,
+    private readonly adminAnalyticsService: AdminAnalyticsService,
     private readonly prisma: PrismaService,
     private readonly sorobanService: SorobanService,
   ) {}
@@ -690,10 +699,33 @@ export class AdminController {
   }
 
   /**
+   * GET /admin/analytics/renewals
+   *
+   * Renewal rate, lapsed count, and average time-to-renewal grouped by policy type
+   * and region. Response is cached in Redis with a 10-minute TTL.
+   */
+  @Get('analytics/renewals')
+  @ApiOperation({ summary: 'Renewal analytics grouped by policy type and region (10-min cache)' })
+  async getRenewalAnalytics() {
+    return this.adminAnalyticsService.getRenewalAnalytics();
+  }
+
+  /**
+   * GET /admin/analytics/support
+   *
+   * Average first-response time and SLA breach count for support tickets.
+   */
+  @Get('analytics/support')
+  @ApiOperation({ summary: 'Support ticket first-response and SLA analytics' })
+  async getSupportAnalytics() {
+    return this.adminAnalyticsService.getSupportAnalytics();
+  }
+
+  /**
    * GET /admin/claims/search
    *
    * Search claims with full-text search and filtering.
-   * Supports: q (text search), status, claimant, policyId, dateFrom, dateTo
+   * Supports: q (text search), status, severity, claimant, policyId, dateFrom, dateTo
    * Returns cursor-paginated results with total count.
    */
   @Get('claims/search')
@@ -701,6 +733,7 @@ export class AdminController {
   async searchClaims(
     @Query('q') q?: string,
     @Query('status') status?: string,
+    @Query('severity') severity?: string,
     @Query('claimant') claimant?: string,
     @Query('policyId') policyId?: string,
     @Query('dateFrom') dateFrom?: string,
@@ -711,6 +744,7 @@ export class AdminController {
     return this.adminService.searchClaims({
       q,
       status,
+      severity,
       claimant,
       policyId,
       dateFrom,
@@ -718,6 +752,38 @@ export class AdminController {
       after,
       limit: limit ? parseInt(limit, 10) : undefined,
     });
+  }
+
+  /**
+   * PATCH /admin/claims/:id/severity
+   *
+   * Set the triage severity level (LOW/MEDIUM/HIGH/CRITICAL) on a claim.
+   * Writes an immutable audit row.
+   */
+  @Patch('claims/:id/severity')
+  @ApiOperation({ summary: 'Set triage severity on a claim' })
+  async setClaimSeverity(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: SetClaimSeverityDto,
+    @Req() req: AdminRequest,
+  ) {
+    const claim = await this.prisma.claim.findFirst({ where: { id, deletedAt: null } });
+    if (!claim) throw new NotFoundException(`Claim ${id} not found`);
+
+    const updated = await this.prisma.claim.update({
+      where: { id },
+      data: { severity: dto.severity },
+    });
+
+    const actor = req.user?.walletAddress ?? 'unknown';
+    await this.auditService.write({
+      actor,
+      action: 'claim_severity_set',
+      payload: { claimId: id, severity: dto.severity },
+      ipAddress: req.ip,
+    });
+
+    return { claimId: id, severity: updated.severity };
   }
 
   /**
@@ -761,5 +827,63 @@ export class AdminController {
     res.setHeader('Content-Type', 'text/csv');
     res.setHeader('Content-Disposition', 'attachment; filename="policies.csv"');
     res.send(csv);
+  }
+
+  // ── #929 Evidence limits ───────────────────────────────────────────────────
+
+  /**
+   * GET /admin/governance/evidence-limits
+   *
+   * Reads min_evidence_count and max_evidence_count from the contract via
+   * Soroban simulation. Requires SOLVENCY_SIMULATION_SOURCE_ACCOUNT to be set.
+   */
+  @Get('governance/evidence-limits')
+  @ApiOperation({ summary: 'Read evidence count limits from the contract (simulation)' })
+  async getEvidenceLimits() {
+    const source =
+      this.configService.get<string>('SOLVENCY_SIMULATION_SOURCE_ACCOUNT') ||
+      this.configService.get<string>('CLAIM_KEEPER_SOURCE_ACCOUNT');
+    if (!source) {
+      throw new BadRequestException({
+        code: 'SIMULATION_SOURCE_NOT_CONFIGURED',
+        message: 'SOLVENCY_SIMULATION_SOURCE_ACCOUNT is not set.',
+      });
+    }
+    return this.soroban.simulateGetEvidenceLimits({ sourceAccount: source });
+  }
+
+  /**
+   * PATCH /admin/governance/evidence-limits
+   *
+   * Updates min_evidence_count and max_evidence_count on-chain.
+   * Validation: min >= 0, max > 0, min <= max.
+   * Writes an immutable audit row.
+   */
+  @Patch('governance/evidence-limits')
+  @ApiOperation({ summary: 'Update evidence count limits on-chain' })
+  async setEvidenceLimits(
+    @Body() body: { min: number; max: number },
+    @Req() req: AdminRequest,
+  ) {
+    const min = Number(body.min);
+    const max = Number(body.max);
+    if (!Number.isInteger(min) || min < 0) {
+      throw new BadRequestException('min must be a non-negative integer');
+    }
+    if (!Number.isInteger(max) || max <= 0) {
+      throw new BadRequestException('max must be a positive integer');
+    }
+    if (min > max) {
+      throw new BadRequestException('min must not exceed max');
+    }
+    const result = await this.soroban.invokeAdminSetEvidenceLimits({ min, max });
+    const actor = req.user?.walletAddress ?? 'unknown';
+    await this.auditService.write({
+      actor,
+      action: 'admin_set_evidence_limits',
+      payload: { min, max, txHash: result.txHash },
+      ipAddress: req.ip,
+    });
+    return result;
   }
 }
