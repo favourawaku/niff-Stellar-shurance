@@ -1,7 +1,7 @@
 'use client'
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Download, Loader2, RefreshCw, ShieldAlert, CheckCircle2, Zap } from 'lucide-react'
+import { Download, Loader2, RefreshCw, ShieldAlert, Tag } from 'lucide-react'
 import Link from 'next/link'
 
 import { Button } from '@/components/ui/button'
@@ -21,9 +21,70 @@ import {
   type AuditEntry,
   type FeatureFlag,
   type SolvencySnapshot,
+  type EvidenceLimits,
   type KeeperActionResult,
 } from '@/lib/api/admin'
 import { getConfig } from '@/config/env'
+import { getPrimaryContractVersion } from '@/lib/network-manifest'
+
+// ── Contract version header ────────────────────────────────────────────────
+
+/**
+ * Fetches the deployed contract semantic version via get_contract_metadata
+ * simulation from the backend, falling back to the registry's deployedVersion.
+ */
+function useContractVersion() {
+  const { apiUrl, network } = getConfig()
+  const [version, setVersion] = useState<string | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    // Try the backend simulation endpoint first
+    fetch(`${apiUrl}/api/contracts/metadata`, { credentials: 'include' })
+      .then(async (res) => {
+        if (!res.ok) throw new Error('metadata fetch failed')
+        const data = await res.json() as { version?: string }
+        if (data?.version) setVersion(data.version)
+        else throw new Error('no version in response')
+      })
+      .catch(() => {
+        // Fallback: read from deployment-registry.json bundled with the app
+        const v = getPrimaryContractVersion(network as 'testnet' | 'mainnet')
+        setVersion(v ?? null)
+      })
+      .finally(() => setLoading(false))
+  }, [apiUrl, network])
+
+  return { version, loading }
+}
+
+function ContractVersionBadge() {
+  const { version, loading } = useContractVersion()
+  const { network } = getConfig()
+
+  if (loading) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-md border border-muted bg-muted/50 px-2.5 py-1 text-xs text-muted-foreground animate-pulse">
+        <Tag className="h-3 w-3" aria-hidden="true" />
+        Loading…
+      </span>
+    )
+  }
+
+  if (!version) return null
+
+  return (
+    <span
+      className="inline-flex items-center gap-1.5 rounded-md border border-border bg-muted/40 px-2.5 py-1 text-xs font-mono font-medium text-foreground"
+      title={`Deployed contract version on ${network}`}
+      aria-label={`Contract version ${version} on ${network}`}
+    >
+      <Tag className="h-3 w-3 text-muted-foreground" aria-hidden="true" />
+      {version}
+      <span className="text-muted-foreground font-sans normal-case">·&nbsp;{network}</span>
+    </span>
+  )
+}
 
 // ── JWT role helper ────────────────────────────────────────────────────────
 
@@ -70,12 +131,15 @@ export default function AdminPage() {
 
   return (
     <main className="mx-auto max-w-5xl px-4 py-8 space-y-8">
-      <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h1 className="text-2xl font-semibold">Admin Dashboard</h1>
+        <ContractVersionBadge />
+      </div>
       <div className="grid gap-6 md:grid-cols-2">
         <SolvencyWidget jwt={jwt} />
         <ReindexWidget jwt={jwt} />
       </div>
-      <KeeperActionsWidget jwt={jwt} />
+      <EvidenceLimitsWidget jwt={jwt} />
       <FeatureFlagsWidget jwt={jwt} />
       <AuditLogWidget jwt={jwt} />
     </main>
@@ -416,160 +480,121 @@ function AuditLogWidget({ jwt }: { jwt: string }) {
   )
 }
 
-// ── #935 Keeper Actions widget ─────────────────────────────────────────────
+// ── #929 Evidence Limits widget ────────────────────────────────────────────
 
-type KeeperResult = KeeperActionResult & { action: string }
+function EvidenceLimitsWidget({ jwt }: { jwt: string }) {
+  const [limits, setLimits] = useState<EvidenceLimits | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
+  const [minInput, setMinInput] = useState('')
+  const [maxInput, setMaxInput] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [result, setResult] = useState<KeeperActionResult | null>(null)
+  const [submitError, setSubmitError] = useState<string | null>(null)
 
-function KeeperActionsWidget({ jwt }: { jwt: string }) {
-  // process_expired state
-  const [holder, setHolder] = useState('')
-  const [policyId, setPolicyId] = useState('')
-  const [expiredSubmitting, setExpiredSubmitting] = useState(false)
-  const [expiredResult, setExpiredResult] = useState<KeeperResult | null>(null)
-  const [expiredError, setExpiredError] = useState<string | null>(null)
+  useEffect(() => {
+    adminApi.getEvidenceLimits(jwt)
+      .then((l) => {
+        setLimits(l)
+        setMinInput(String(l.minEvidenceCount))
+        setMaxInput(String(l.maxEvidenceCount))
+      })
+      .catch((e: unknown) => setError(e instanceof Error ? e.message : 'Failed to load'))
+      .finally(() => setLoading(false))
+  }, [jwt])
 
-  // process_deadline state
-  const [claimId, setClaimId] = useState('')
-  const [deadlineSubmitting, setDeadlineSubmitting] = useState(false)
-  const [deadlineResult, setDeadlineResult] = useState<KeeperResult | null>(null)
-  const [deadlineError, setDeadlineError] = useState<string | null>(null)
+  const minVal = parseInt(minInput, 10)
+  const maxVal = parseInt(maxInput, 10)
+  const minValid = Number.isFinite(minVal) && minVal >= 0
+  const maxValid = Number.isFinite(maxVal) && maxVal > 0
+  const orderValid = minValid && maxValid && minVal <= maxVal
 
-  const pidVal = parseInt(policyId, 10)
-  const cidVal = parseInt(claimId, 10)
-
-  async function handleProcessExpired(e: React.FormEvent) {
+  async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
-    if (!holder || !Number.isFinite(pidVal) || pidVal < 0) return
-    setExpiredSubmitting(true)
-    setExpiredError(null)
-    setExpiredResult(null)
+    if (!orderValid) return
+    setSubmitting(true)
+    setSubmitError(null)
+    setResult(null)
     try {
-      const r = await adminApi.processExpired(jwt, holder.trim(), pidVal)
-      setExpiredResult({ ...r, action: 'process_expired' })
+      const r = await adminApi.setEvidenceLimits(jwt, minVal, maxVal)
+      setResult(r)
+      setLimits({ minEvidenceCount: minVal, maxEvidenceCount: maxVal })
     } catch (err: unknown) {
-      setExpiredError(err instanceof Error ? err.message : 'Failed')
+      setSubmitError(err instanceof Error ? err.message : 'Failed')
     } finally {
-      setExpiredSubmitting(false)
-    }
-  }
-
-  async function handleProcessDeadline(e: React.FormEvent) {
-    e.preventDefault()
-    if (!Number.isFinite(cidVal) || cidVal < 0) return
-    setDeadlineSubmitting(true)
-    setDeadlineError(null)
-    setDeadlineResult(null)
-    try {
-      const r = await adminApi.processDeadline(jwt, cidVal)
-      setDeadlineResult({ ...r, action: 'process_deadline' })
-    } catch (err: unknown) {
-      setDeadlineError(err instanceof Error ? err.message : 'Failed')
-    } finally {
-      setDeadlineSubmitting(false)
+      setSubmitting(false)
     }
   }
 
   return (
     <Card>
       <CardHeader>
-        <CardTitle className="flex items-center gap-2">
-          <Zap className="h-4 w-4" aria-hidden="true" />
-          Keeper Actions
-        </CardTitle>
+        <CardTitle>Evidence Limits</CardTitle>
         <CardDescription>
-          Manually trigger keeper contract calls. Use with care — these submit signed
-          on-chain transactions using the platform keeper key.
+          Set the minimum and maximum number of evidence items required per claim.
+          Inline validation prevents submitting min &gt; max.
         </CardDescription>
       </CardHeader>
-      <CardContent className="space-y-6">
-        {/* process_expired */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-semibold">process_expired</h3>
-          <p className="text-xs text-muted-foreground">
-            Expires a policy that has passed its coverage end date.
-          </p>
-          <form onSubmit={handleProcessExpired} className="space-y-2">
+      <CardContent className="space-y-4">
+        {loading && <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" aria-label="Loading" />}
+        {error && <p className="text-sm text-destructive" role="alert">{error}</p>}
+        {limits && (
+          <dl className="space-y-2 text-sm">
+            <Row label="Current min" value={String(limits.minEvidenceCount)} />
+            <Row label="Current max" value={String(limits.maxEvidenceCount)} />
+          </dl>
+        )}
+        <form onSubmit={handleSubmit} className="space-y-3">
+          <div className="flex gap-4 items-end">
             <div className="space-y-1">
-              <label htmlFor="expired-holder" className="text-xs font-medium">Holder address</label>
+              <label htmlFor="evidence-min" className="text-sm font-medium">Min</label>
               <Input
-                id="expired-holder"
-                type="text"
-                placeholder="G…"
-                value={holder}
-                onChange={(e) => { setHolder(e.target.value); setExpiredResult(null) }}
-                className="h-8 text-xs font-mono"
-              />
-            </div>
-            <div className="space-y-1">
-              <label htmlFor="expired-policy-id" className="text-xs font-medium">Policy ID</label>
-              <Input
-                id="expired-policy-id"
+                id="evidence-min"
                 type="number"
                 min={0}
-                value={policyId}
-                onChange={(e) => { setPolicyId(e.target.value); setExpiredResult(null) }}
-                className="h-8 w-28 text-xs"
+                value={minInput}
+                onChange={(e) => { setMinInput(e.target.value); setResult(null) }}
+                aria-invalid={minInput !== '' && !minValid}
+                className="h-8 w-20 text-sm"
               />
             </div>
-            {expiredError && <p className="text-xs text-destructive" role="alert">{expiredError}</p>}
-            {expiredResult && (
-              <p className="text-xs text-green-700 flex items-center gap-1" role="status">
-                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                Done — tx {expiredResult.txHash.slice(0, 12)}… (ledger {expiredResult.ledger})
-              </p>
-            )}
-            <Button
-              type="submit"
-              size="sm"
-              disabled={expiredSubmitting || !holder.trim() || !Number.isFinite(pidVal)}
-              aria-busy={expiredSubmitting}
-            >
-              {expiredSubmitting
-                ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />Running…</>
-                : 'Run process_expired'}
-            </Button>
-          </form>
-        </div>
-
-        <hr className="border-border" />
-
-        {/* process_deadline */}
-        <div className="space-y-2">
-          <h3 className="text-sm font-semibold">process_deadline</h3>
-          <p className="text-xs text-muted-foreground">
-            Finalises a claim that has passed its voting deadline.
-          </p>
-          <form onSubmit={handleProcessDeadline} className="space-y-2">
             <div className="space-y-1">
-              <label htmlFor="deadline-claim-id" className="text-xs font-medium">Claim ID</label>
+              <label htmlFor="evidence-max" className="text-sm font-medium">Max</label>
               <Input
-                id="deadline-claim-id"
+                id="evidence-max"
                 type="number"
-                min={0}
-                value={claimId}
-                onChange={(e) => { setClaimId(e.target.value); setDeadlineResult(null) }}
-                className="h-8 w-28 text-xs"
+                min={1}
+                value={maxInput}
+                onChange={(e) => { setMaxInput(e.target.value); setResult(null) }}
+                aria-invalid={maxInput !== '' && !maxValid}
+                className="h-8 w-20 text-sm"
               />
             </div>
-            {deadlineError && <p className="text-xs text-destructive" role="alert">{deadlineError}</p>}
-            {deadlineResult && (
-              <p className="text-xs text-green-700 flex items-center gap-1" role="status">
-                <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
-                Done — tx {deadlineResult.txHash.slice(0, 12)}… (ledger {deadlineResult.ledger})
-              </p>
-            )}
-            <Button
-              type="submit"
-              size="sm"
-              disabled={deadlineSubmitting || !Number.isFinite(cidVal)}
-              aria-busy={deadlineSubmitting}
-            >
-              {deadlineSubmitting
-                ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />Running…</>
-                : 'Run process_deadline'}
-            </Button>
-          </form>
-        </div>
+          </div>
+          {minValid && maxValid && !orderValid && (
+            <p className="text-xs text-destructive flex items-center gap-1" role="alert">
+              <AlertCircle className="h-3.5 w-3.5" aria-hidden="true" />
+              Min must not exceed max
+            </p>
+          )}
+          {submitError && <p className="text-xs text-destructive" role="alert">{submitError}</p>}
+          {result && (
+            <p className="text-xs text-green-700 flex items-center gap-1" role="status">
+              <CheckCircle2 className="h-3.5 w-3.5" aria-hidden="true" />
+              Updated — tx {result.txHash.slice(0, 12)}…
+            </p>
+          )}
+          <Button
+            type="submit"
+            size="sm"
+            disabled={submitting || !orderValid}
+            aria-busy={submitting}
+          >
+            {submitting
+              ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />Updating…</>
+              : 'Update limits'}
+          </Button>
+        </form>
       </CardContent>
     </Card>
   )

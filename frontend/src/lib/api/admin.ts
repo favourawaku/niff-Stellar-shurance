@@ -9,6 +9,33 @@ function authHeaders(jwt: string) {
   return { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' }
 }
 
+// ── Governance Types ────────────────────────────────────────────────────────
+
+export interface RegisteredVoter {
+  walletAddress: string
+  displayName?: string | null
+  registeredBy: string
+  registeredAt: string
+}
+
+export interface QuorumSettings {
+  quorum_bps: number
+}
+
+export interface QuorumImpact {
+  totalActiveClaims: number
+  affectedClaims: Array<{
+    claimId: number
+    currentQuorumBps: number
+    newQuorumBps: number
+    eligibleVoters: number
+    currentRequired: number
+    newRequired: number
+    status: string
+  }>
+  quorumBps: number | null
+}
+
 // ── Types ──────────────────────────────────────────────────────────────────
 
 export interface SolvencySnapshot {
@@ -73,11 +100,45 @@ export interface BulkUpdateResult {
   updated: number
 }
 
-// ── #935 Keeper actions ────────────────────────────────────────────────────
+export interface AllowedAsset {
+  id: string
+  contractId: string
+  symbol: string
+  decimals: number
+  isAllowed: boolean
+}
 
-export interface KeeperActionResult {
-  txHash: string
-  ledger: number
+export interface AddAssetParams {
+  contractId: string
+  symbol: string
+  decimals: number
+}
+
+// ── Governance Proposal Types ─────────────────────────────────────────────────
+
+export type ProposalStatus = 'active' | 'passed' | 'rejected' | 'executed'
+
+export interface GovernanceProposal {
+  id: string
+  title: string
+  description: string
+  proposer: string
+  status: ProposalStatus
+  parameterKey: string
+  currentValue: string
+  proposedValue: string
+  yesVotes: number
+  noVotes: number
+  quorumRequired: number
+  createdAt: string
+  votingDeadline: string
+}
+
+export interface CreateProposalParams {
+  title: string
+  description: string
+  parameterKey: string
+  proposedValue: string
 }
 
 // ── API calls ──────────────────────────────────────────────────────────────
@@ -150,19 +211,38 @@ export const adminApi = {
       body: JSON.stringify({ claimIds, status, dryRun }),
     }),
 
-  // ── #935 Keeper actions ───────────────────────────────────────────────────
+  listAssets: (jwt: string) =>
+    apiFetch<AllowedAsset[]>(`${base()}/assets`, { headers: authHeaders(jwt) }),
 
-  processExpired: (jwt: string, holder: string, policyId: number) =>
-    apiFetch<KeeperActionResult>(`${base()}/keeper/process-expired`, {
+  addAsset: (jwt: string, params: AddAssetParams) =>
+    apiFetch<AllowedAsset>(`${base()}/assets`, {
       method: 'POST',
       headers: authHeaders(jwt),
-      body: JSON.stringify({ holder, policyId }),
+      body: JSON.stringify(params),
     }),
 
-  processDeadline: (jwt: string, claimId: number) =>
-    apiFetch<KeeperActionResult>(`${base()}/keeper/process-deadline`, {
+  setAssetAllowed: (jwt: string, id: string, isAllowed: boolean) =>
+    apiFetch<AllowedAsset>(`${base()}/assets/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      headers: authHeaders(jwt),
+      body: JSON.stringify({ isAllowed }),
+    }),
+
+  removeAsset: (jwt: string, id: string) =>
+    apiFetch<void>(`${base()}/assets/${encodeURIComponent(id)}`, {
+      method: 'DELETE',
+      headers: authHeaders(jwt),
+    }),
+
+  listProposals: (jwt: string) =>
+    apiFetch<GovernanceProposal[]>(`${base()}/governance/proposals`, {
+      headers: authHeaders(jwt),
+    }),
+
+  createProposal: (jwt: string, params: CreateProposalParams) =>
+    apiFetch<GovernanceProposal>(`${base()}/governance/proposals`, {
       method: 'POST',
       headers: authHeaders(jwt),
-      body: JSON.stringify({ claimId }),
+      body: JSON.stringify(params),
     }),
 }

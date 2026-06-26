@@ -15,10 +15,12 @@ import {
   HttpStatus,
   NotFoundException,
   Logger,
+  ParseIntPipe,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { ApiBearerAuth, ApiOperation, ApiTags } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsString } from 'class-validator';
+import { IsArray, IsEnum, IsInt, IsOptional, IsString, Max, Min, ArrayNotEmpty, Matches, IsIn } from 'class-validator';
+import { ClaimSeverity } from '@prisma/client';
 import { Request, Response } from 'express';
 import { Prisma } from '@prisma/client';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -37,12 +39,40 @@ import { QueueMonitorService } from '../queues/queue-monitor.service';
 import { SolvencyMonitoringService } from '../maintenance/solvency-monitoring.service';
 import { AdminTenantsService } from './admin-tenants.service';
 import { AdminStatsService } from './admin-stats.service';
+import { AdminAnalyticsService } from './admin-analytics.service';
+import { PrismaService } from '../prisma/prisma.service';
 import { SorobanService } from '../rpc/soroban.service';
+
+class BatchRegisterVotersDto {
+  @IsArray()
+  @ArrayNotEmpty()
+  @IsString({ each: true })
+  @Matches(/^G[A-Z2-7]{55}$/, { each: true, message: 'Each voter must be a valid Stellar public key (G...)' })
+  voters!: string[];
+}
+
+class RemoveVoterDto {
+  @IsString()
+  @Matches(/^G[A-Z2-7]{55}$/, { message: 'voter must be a valid Stellar public key (G...)' })
+  voter!: string;
+}
+
+class SetQuorumBpsDto {
+  @IsInt()
+  @Min(1)
+  @Max(10000)
+  bps!: number;
+}
 
 class PrivacyRequestDto {
   @IsString() subjectWalletAddress!: string;
   @IsEnum(['ANONYMIZE', 'DELETE']) requestType!: PrivacyRequestType;
   @IsOptional() @IsString() notes?: string;
+}
+
+class SetClaimSeverityDto {
+  @IsIn(['LOW', 'MEDIUM', 'HIGH', 'CRITICAL'])
+  severity!: ClaimSeverity;
 }
 
 type AdminRequest = Request & {
@@ -77,8 +107,157 @@ export class AdminController {
     private readonly solvencyMonitoringService: SolvencyMonitoringService,
     private readonly tenantsService: AdminTenantsService,
     private readonly adminStatsService: AdminStatsService,
-    private readonly soroban: SorobanService,
+    private readonly adminAnalyticsService: AdminAnalyticsService,
+    private readonly prisma: PrismaService,
+    private readonly sorobanService: SorobanService,
   ) {}
+
+  // ── Governance: Voters ────────────────────────────────────────────
+
+  /**
+   * GET /admin/governance/voters
+   *
+   * List all registered voters from the local tracking table.
+   */
+  @Get('governance/voters')
+  @ApiOperation({ summary: 'List registered voters' })
+  async listVoters() {
+    return this.prisma.registeredVoter.findMany({
+      orderBy: { registeredAt: 'desc' },
+    });
+  }
+
+  /**
+   * POST /admin/governance/voters/batch-register
+   *
+   * Build an unsigned batch_register_voter transaction for the given voters.
+   * Returns the unsigned XDR for admin wallet signing.
+   */
+  @Post('governance/voters/batch-register')
+  @ApiOperation({ summary: 'Build batch voter registration transaction' })
+  async batchRegisterVoters(@Body() dto: BatchRegisterVotersDto, @Req() req: AdminRequest) {
+    const admin = req.user?.walletAddress ?? '';
+    const result = await this.sorobanService.buildBatchRegisterVotersTransaction({
+      admin,
+      voters: dto.voters,
+    });
+
+    await this.auditService.write({
+      actor: admin,
+      action: 'governance_voters_batch_register',
+      payload: { voterCount: dto.voters.length, voters: dto.voters },
+      ipAddress: req.ip,
+    });
+
+    return result;
+  }
+
+  /**
+   * POST /admin/governance/voters/remove
+   *
+   * Build an unsigned remove_voter transaction for a single voter.
+   * Returns the unsigned XDR for admin wallet signing.
+   */
+  @Post('governance/voters/remove')
+  @ApiOperation({ summary: 'Build remove voter transaction' })
+  async removeVoter(@Body() dto: RemoveVoterDto, @Req() req: AdminRequest) {
+    const admin = req.user?.walletAddress ?? '';
+    const result = await this.sorobanService.buildRemoveVoterTransaction({
+      admin,
+      voter: dto.voter,
+    });
+
+    await this.auditService.write({
+      actor: admin,
+      action: 'governance_voters_remove',
+      payload: { voter: dto.voter },
+      ipAddress: req.ip,
+    });
+
+    return result;
+  }
+
+  // ── Governance: Quorum ────────────────────────────────────────────
+
+  /**
+   * GET /admin/governance/quorum
+   *
+   * Returns the current quorum_bps value from the contract (via simulation).
+   */
+  @Get('governance/quorum')
+  @ApiOperation({ summary: 'Get current quorum_bps value' })
+  async getQuorum() {
+    const result = await this.sorobanService.simulateGetQuorumBps();
+    return { quorum_bps: result };
+  }
+
+  /**
+   * POST /admin/governance/quorum
+   *
+   * Build an unsigned admin_set_quorum_bps transaction.
+   * Returns the unsigned XDR for admin wallet signing.
+   */
+  @Post('governance/quorum')
+  @ApiOperation({ summary: 'Build set quorum_bps transaction' })
+  async setQuorum(@Body() dto: SetQuorumBpsDto, @Req() req: AdminRequest) {
+    const admin = req.user?.walletAddress ?? '';
+    const result = await this.sorobanService.buildSetQuorumBpsTransaction({
+      admin,
+      bps: dto.bps,
+    });
+
+    await this.auditService.write({
+      actor: admin,
+      action: 'governance_quorum_update',
+      payload: { bps: dto.bps },
+      ipAddress: req.ip,
+    });
+
+    return result;
+  }
+
+  /**
+   * GET /admin/governance/quorum/impact
+   *
+   * Returns the number of active (non-finalized) claims that would be
+   * affected by changing quorum_bps to the given value.
+   */
+  @Get('governance/quorum/impact')
+  @ApiOperation({ summary: 'Preview impact of quorum change on active claims' })
+  async getQuorumImpact(@Query('bps') bps?: string, @Req() req?: AdminRequest) {
+    const targetBps = bps ? parseInt(bps, 10) : null;
+    if (targetBps !== null && (isNaN(targetBps) || targetBps < 1 || targetBps > 10000)) {
+      throw new BadRequestException('bps must be between 1 and 10000');
+    }
+
+    const activeClaims = await this.prisma.claim.findMany({
+      where: { isFinalized: false, deletedAt: null },
+      include: { votes: true },
+    });
+
+    const impacted = await Promise.all(activeClaims.map(async (claim) => {
+      const eligibleVoters = claim.approveVotes + claim.rejectVotes;
+      const currentRequired = Math.max(1, Math.floor(eligibleVoters / 2) + 1);
+      const newRequired = targetBps !== null
+        ? Math.max(1, Math.floor((eligibleVoters * targetBps) / 10000))
+        : currentRequired;
+      return {
+        claimId: claim.id,
+        currentQuorumBps: 5000,
+        newQuorumBps: targetBps ?? 5000,
+        eligibleVoters,
+        currentRequired,
+        newRequired,
+        status: claim.status,
+      };
+    }));
+
+    return {
+      totalActiveClaims: activeClaims.length,
+      affectedClaims: impacted.filter(i => i.currentRequired !== i.newRequired),
+      quorumBps: targetBps,
+    };
+  }
 
   /**
    * GET /admin/stats
@@ -473,10 +652,33 @@ export class AdminController {
   }
 
   /**
+   * GET /admin/analytics/renewals
+   *
+   * Renewal rate, lapsed count, and average time-to-renewal grouped by policy type
+   * and region. Response is cached in Redis with a 10-minute TTL.
+   */
+  @Get('analytics/renewals')
+  @ApiOperation({ summary: 'Renewal analytics grouped by policy type and region (10-min cache)' })
+  async getRenewalAnalytics() {
+    return this.adminAnalyticsService.getRenewalAnalytics();
+  }
+
+  /**
+   * GET /admin/analytics/support
+   *
+   * Average first-response time and SLA breach count for support tickets.
+   */
+  @Get('analytics/support')
+  @ApiOperation({ summary: 'Support ticket first-response and SLA analytics' })
+  async getSupportAnalytics() {
+    return this.adminAnalyticsService.getSupportAnalytics();
+  }
+
+  /**
    * GET /admin/claims/search
    *
    * Search claims with full-text search and filtering.
-   * Supports: q (text search), status, claimant, policyId, dateFrom, dateTo
+   * Supports: q (text search), status, severity, claimant, policyId, dateFrom, dateTo
    * Returns cursor-paginated results with total count.
    */
   @Get('claims/search')
@@ -484,6 +686,7 @@ export class AdminController {
   async searchClaims(
     @Query('q') q?: string,
     @Query('status') status?: string,
+    @Query('severity') severity?: string,
     @Query('claimant') claimant?: string,
     @Query('policyId') policyId?: string,
     @Query('dateFrom') dateFrom?: string,
@@ -494,6 +697,7 @@ export class AdminController {
     return this.adminService.searchClaims({
       q,
       status,
+      severity,
       claimant,
       policyId,
       dateFrom,
@@ -501,6 +705,38 @@ export class AdminController {
       after,
       limit: limit ? parseInt(limit, 10) : undefined,
     });
+  }
+
+  /**
+   * PATCH /admin/claims/:id/severity
+   *
+   * Set the triage severity level (LOW/MEDIUM/HIGH/CRITICAL) on a claim.
+   * Writes an immutable audit row.
+   */
+  @Patch('claims/:id/severity')
+  @ApiOperation({ summary: 'Set triage severity on a claim' })
+  async setClaimSeverity(
+    @Param('id', ParseIntPipe) id: number,
+    @Body() dto: SetClaimSeverityDto,
+    @Req() req: AdminRequest,
+  ) {
+    const claim = await this.prisma.claim.findFirst({ where: { id, deletedAt: null } });
+    if (!claim) throw new NotFoundException(`Claim ${id} not found`);
+
+    const updated = await this.prisma.claim.update({
+      where: { id },
+      data: { severity: dto.severity },
+    });
+
+    const actor = req.user?.walletAddress ?? 'unknown';
+    await this.auditService.write({
+      actor,
+      action: 'claim_severity_set',
+      payload: { claimId: id, severity: dto.severity },
+      ipAddress: req.ip,
+    });
+
+    return { claimId: id, severity: updated.severity };
   }
 
   /**
@@ -546,51 +782,59 @@ export class AdminController {
     res.send(csv);
   }
 
-  // ── #935 Keeper Actions ────────────────────────────────────────────────────
+  // ── #929 Evidence limits ───────────────────────────────────────────────────
 
-  @Post('keeper/process-expired')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Trigger process_expired(holder, policyId) on-chain via keeper key' })
-  async processExpired(
-    @Body() body: { holder: string; policyId: number },
-    @Req() req: AdminRequest,
-  ) {
-    const { holder, policyId } = body;
-    if (!holder || typeof holder !== 'string') {
-      throw new BadRequestException({ code: 'INVALID_HOLDER', message: 'holder must be a Stellar account address' });
+  /**
+   * GET /admin/governance/evidence-limits
+   *
+   * Reads min_evidence_count and max_evidence_count from the contract via
+   * Soroban simulation. Requires SOLVENCY_SIMULATION_SOURCE_ACCOUNT to be set.
+   */
+  @Get('governance/evidence-limits')
+  @ApiOperation({ summary: 'Read evidence count limits from the contract (simulation)' })
+  async getEvidenceLimits() {
+    const source =
+      this.configService.get<string>('SOLVENCY_SIMULATION_SOURCE_ACCOUNT') ||
+      this.configService.get<string>('CLAIM_KEEPER_SOURCE_ACCOUNT');
+    if (!source) {
+      throw new BadRequestException({
+        code: 'SIMULATION_SOURCE_NOT_CONFIGURED',
+        message: 'SOLVENCY_SIMULATION_SOURCE_ACCOUNT is not set.',
+      });
     }
-    const pid = Number(policyId);
-    if (!Number.isFinite(pid) || pid < 0 || !Number.isInteger(pid)) {
-      throw new BadRequestException({ code: 'INVALID_POLICY_ID', message: 'policyId must be a non-negative integer' });
-    }
-    const actor = req.user?.walletAddress ?? req.adminIdentity?.email ?? 'unknown';
-    const result = await this.soroban.invokeProcessExpired({ holder, policyId: pid });
-    await this.auditService.write({
-      actor,
-      action: 'keeper_process_expired',
-      payload: { holder, policyId: pid, txHash: result.txHash },
-      ipAddress: req.ip,
-    });
-    return result;
+    return this.soroban.simulateGetEvidenceLimits({ sourceAccount: source });
   }
 
-  @Post('keeper/process-deadline')
-  @HttpCode(HttpStatus.OK)
-  @ApiOperation({ summary: 'Trigger process_deadline(claimId) on-chain via keeper key' })
-  async processDeadline(
-    @Body() body: { claimId: number },
+  /**
+   * PATCH /admin/governance/evidence-limits
+   *
+   * Updates min_evidence_count and max_evidence_count on-chain.
+   * Validation: min >= 0, max > 0, min <= max.
+   * Writes an immutable audit row.
+   */
+  @Patch('governance/evidence-limits')
+  @ApiOperation({ summary: 'Update evidence count limits on-chain' })
+  async setEvidenceLimits(
+    @Body() body: { min: number; max: number },
     @Req() req: AdminRequest,
   ) {
-    const cid = Number(body.claimId);
-    if (!Number.isFinite(cid) || cid < 0 || !Number.isInteger(cid)) {
-      throw new BadRequestException({ code: 'INVALID_CLAIM_ID', message: 'claimId must be a non-negative integer' });
+    const min = Number(body.min);
+    const max = Number(body.max);
+    if (!Number.isInteger(min) || min < 0) {
+      throw new BadRequestException('min must be a non-negative integer');
     }
-    const actor = req.user?.walletAddress ?? req.adminIdentity?.email ?? 'unknown';
-    const result = await this.soroban.invokeProcessDeadline({ claimId: cid });
+    if (!Number.isInteger(max) || max <= 0) {
+      throw new BadRequestException('max must be a positive integer');
+    }
+    if (min > max) {
+      throw new BadRequestException('min must not exceed max');
+    }
+    const result = await this.soroban.invokeAdminSetEvidenceLimits({ min, max });
+    const actor = req.user?.walletAddress ?? 'unknown';
     await this.auditService.write({
       actor,
-      action: 'keeper_process_deadline',
-      payload: { claimId: cid, txHash: result.txHash },
+      action: 'admin_set_evidence_limits',
+      payload: { min, max, txHash: result.txHash },
       ipAddress: req.ip,
     });
     return result;
