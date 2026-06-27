@@ -9,6 +9,7 @@ import { PolicyMetadataUriViewer } from '@/components/policies/PolicyMetadataUri
 import { useWallet } from '@/features/wallet'
 import { RenewModal } from './RenewModal'
 import { TerminateModal } from './TerminateModal'
+import { ClaimCooldownBanner } from './ClaimCooldownBanner'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -24,6 +25,7 @@ interface PolicyDetailClientProps {
 
 const LEDGER_CLOSE_SECONDS = 5
 const RENEWAL_WINDOW_LEDGERS = (30 * 24 * 60 * 60) / LEDGER_CLOSE_SECONDS
+const DEFAULT_GRACE_PERIOD_LEDGERS = 8640 // 72 hours (3 days) at 5s per ledger
 
 function formatStroopsToXLM(stroops: string): string {
   const num = BigInt(stroops)
@@ -260,6 +262,13 @@ export function PolicyDetailClient({ initialPolicy, policyId }: PolicyDetailClie
       </Card>
 
       <ClaimCapCard policyId={policyId} />
+
+      {policy.claim_cooldown && policy.claim_cooldown.ledgers_remaining > 0 && (
+        <ClaimCooldownBanner
+          ledgersRemaining={policy.claim_cooldown.ledgers_remaining}
+          estimatedSecondsRemaining={policy.claim_cooldown.estimated_seconds_remaining}
+        />
+      )}
 
       <Card>
         <CardHeader><CardTitle className="flex items-center gap-2"><FileText className="h-5 w-5" />Linked Claims</CardTitle></CardHeader>
