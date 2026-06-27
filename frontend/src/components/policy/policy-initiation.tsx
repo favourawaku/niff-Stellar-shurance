@@ -376,13 +376,19 @@ export function PolicyInitiation({ quoteId: propQuoteId }: PolicyInitiationProps
                       <span>Premium:</span>
                       <span className="font-semibold">{quote ? fmt(quote.premiumStroops) : '0'} {tokenSymbol}</span>
                     </div>
+                    {quote && (
+                      <div className="flex justify-between text-muted-foreground">
+                        <span>Protocol Fee ({((quote.protocolFeeBps ?? 500) / 100).toFixed(2)}%):</span>
+                        <span>{fmt(String(BigInt(quote.premiumStroops) * BigInt(quote.protocolFeeBps ?? 500) / BigInt(10000)))} {tokenSymbol}</span>
+                      </div>
+                    )}
                     <div className="flex justify-between">
                       <span>Network Fee:</span>
                       <span className="font-semibold">0.01 {tokenSymbol}</span>
                     </div>
                     <div className="flex justify-between border-t pt-2">
                       <span>Total:</span>
-                      <span className="font-semibold">{quote ? fmt(String(BigInt(quote.premiumStroops) + 10n ** BigInt(tokenDecimals) / 100n)) : '0.01'} {tokenSymbol}</span>
+                      <span className="font-semibold">{quote ? fmt(String(BigInt(quote.premiumStroops) + BigInt(quote.premiumStroops) * BigInt(quote.protocolFeeBps ?? 500) / BigInt(10000) + 10n ** BigInt(tokenDecimals) / 100n)) : '0.01'} {tokenSymbol}</span>
                     </div>
                   </div>
                 </div>

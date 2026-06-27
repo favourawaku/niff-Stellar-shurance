@@ -70,6 +70,8 @@ export function QuoteResult({ status, quote, error, inputs }: Props) {
   const href = buildPurchaseHref(inputs, quote)
   const symbol = quote.tokenSymbol ?? 'XLM'
   const decimals = quote.tokenDecimals ?? 7
+  const protocolFeeBps = quote.protocolFeeBps ?? 500
+  const protocolFeeStroops = BigInt(quote.premiumStroops) * BigInt(protocolFeeBps) / BigInt(10000)
 
   return (
     <div className="space-y-5" aria-live="polite" aria-atomic="true">
@@ -110,6 +112,10 @@ export function QuoteResult({ status, quote, error, inputs }: Props) {
             <div>
               <dt className="text-muted-foreground">Min Resource Fee</dt>
               <dd className="font-medium">{quote.minResourceFee} stroops</dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Protocol Fee</dt>
+              <dd className="font-medium">{(protocolFeeBps / 100).toFixed(2)}%</dd>
             </div>
           </dl>
         </CardContent>
